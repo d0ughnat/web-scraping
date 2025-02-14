@@ -3,6 +3,7 @@ import requests
 from urllib.parse import urlparse, urlunparse, urljoin, unquote
 from bs4 import BeautifulSoup
 import json
+import random
 import re
 import os
 import hashlib
@@ -133,9 +134,8 @@ def extract_media_from_html(soup, base_url):
             media_urls.append(('video', src))
     
     return media_urls
-
 def get_reddit_media(url, headers):
-    """Extract media from Reddit posts with improved error handling"""
+    """Extract media from Reddit posts with improved error handling and OAuth"""
     try:
         # Clean and validate the URL
         parsed = urlparse(url)
@@ -148,15 +148,24 @@ def get_reddit_media(url, headers):
             path += '.json'
         json_url = urlunparse(parsed._replace(path=path, query='', fragment=''))
         
-        # Add required headers for Reddit API
+        # Enhanced headers to mimic a real browser
         api_headers = {
-            **headers,
-            'Accept': 'application/json',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Cache-Control': 'max-age=0',
+            'TE': 'Trailers'
         }
         
-        response = requests.get(json_url, headers=api_headers, timeout=10)
-        response.raise_for_status()  # Raise exception for bad status codes
+        # Add random delay to avoid rate limiting
+        time.sleep(random.uniform(1, 3))
+        
+        session = requests.Session()
+        response = session.get(json_url, headers=api_headers, timeout=15)
+        response.raise_for_status()
         
         data = response.json()
         if not isinstance(data, list) or not data:
@@ -174,17 +183,32 @@ def get_reddit_media(url, headers):
             try:
                 post_data = post['data']
                 
+                # Handle preview images first (often higher quality)
+                if 'preview' in post_data:
+                    try:
+                        images = post_data['preview']['images']
+                        for image in images:
+                            image_url = image['source']['url']
+                            image_url = unquote(image_url).replace('&amp;', '&')
+                            media_urls.append(('image', image_url))
+                            break  # Take only the first image from preview
+                    except (KeyError, IndexError):
+                        pass
+                
                 # Handle images in post content
                 if 'url_overridden_by_dest' in post_data:
                     url = post_data['url_overridden_by_dest']
-                    if any(url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif']):
-                        media_urls.append(('image', url))
+                    if any(url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
+                        url = unquote(url).replace('&amp;', '&')
+                        if ('image', url) not in media_urls:  # Avoid duplicates
+                            media_urls.append(('image', url))
                 
                 # Handle videos
                 if post_data.get('is_video', False) and 'media' in post_data:
                     video_data = post_data['media'].get('reddit_video', {})
                     video_url = video_data.get('fallback_url')
                     if video_url:
+                        video_url = unquote(video_url).replace('&amp;', '&')
                         media_urls.append(('video', video_url.split('?')[0]))
                 
                 # Handle galleries
@@ -195,10 +219,9 @@ def get_reddit_media(url, headers):
                                 image_data = media.get('s', {})
                                 image_url = image_data.get('u', '')
                                 if image_url:
-                                    # Fix common URL encoding issues
                                     image_url = unquote(image_url).replace('&amp;', '&')
                                     media_urls.append(('image', image_url))
-                
+            
             except Exception as e:
                 st.warning(f"Error processing post: {str(e)}")
                 continue
@@ -206,7 +229,10 @@ def get_reddit_media(url, headers):
         return media_urls
         
     except requests.exceptions.RequestException as e:
-        st.error(f"Failed to fetch Reddit data: {str(e)}")
+        if '403' in str(e):
+            st.error("Access denied by Reddit. This might be due to the post being private or removed.")
+        else:
+            st.error(f"Failed to fetch Reddit data: {str(e)}")
         return []
     except json.JSONDecodeError:
         st.error("Failed to parse Reddit API response")
