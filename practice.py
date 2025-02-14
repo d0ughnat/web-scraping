@@ -135,50 +135,85 @@ def extract_media_from_html(soup, base_url):
     return media_urls
 
 def get_reddit_media(url, headers):
-    """Extract media from Reddit posts"""
+    """Extract media from Reddit posts with improved error handling"""
     try:
+        # Clean and validate the URL
         parsed = urlparse(url)
+        if not parsed.netloc.endswith('reddit.com'):
+            return []
+            
+        # Convert to JSON API URL
         path = parsed.path.rstrip('/')
         if not path.endswith('.json'):
             path += '.json'
         json_url = urlunparse(parsed._replace(path=path, query='', fragment=''))
         
-        response = requests.get(json_url, headers=headers)
-        if response.status_code == 200:
-            data = response.json()
-            media_urls = []
+        # Add required headers for Reddit API
+        api_headers = {
+            **headers,
+            'Accept': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        response = requests.get(json_url, headers=api_headers, timeout=10)
+        response.raise_for_status()  # Raise exception for bad status codes
+        
+        data = response.json()
+        if not isinstance(data, list) or not data:
+            st.error("Invalid Reddit API response format")
+            return []
             
+        media_urls = []
+        try:
             posts = data[0]['data']['children']
-            for post in posts:
+        except (KeyError, IndexError):
+            st.error("Could not find posts in Reddit API response")
+            return []
+            
+        for post in posts:
+            try:
                 post_data = post['data']
                 
+                # Handle images in post content
+                if 'url_overridden_by_dest' in post_data:
+                    url = post_data['url_overridden_by_dest']
+                    if any(url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif']):
+                        media_urls.append(('image', url))
+                
                 # Handle videos
-                if post_data.get('is_video', False):
-                    video_url = post_data.get('media', {}).get('reddit_video', {}).get('fallback_url')
+                if post_data.get('is_video', False) and 'media' in post_data:
+                    video_data = post_data['media'].get('reddit_video', {})
+                    video_url = video_data.get('fallback_url')
                     if video_url:
                         media_urls.append(('video', video_url.split('?')[0]))
                 
                 # Handle galleries
-                elif post_data.get('is_gallery', False):
-                    media_metadata = post_data.get('media_metadata', {})
-                    for media_id in media_metadata:
-                        media = media_metadata[media_id]
-                        if media.get('status') == 'valid' and media.get('e') == 'Image':
-                            image_url = media['s'].get('u', '')
-                            if image_url:
-                                media_urls.append(('image', image_url.split('?')[0]))
+                if post_data.get('is_gallery', False) and 'media_metadata' in post_data:
+                    for media_id, media in post_data['media_metadata'].items():
+                        if media.get('status') == 'valid':
+                            if media.get('e') == 'Image':
+                                image_data = media.get('s', {})
+                                image_url = image_data.get('u', '')
+                                if image_url:
+                                    # Fix common URL encoding issues
+                                    image_url = unquote(image_url).replace('&amp;', '&')
+                                    media_urls.append(('image', image_url))
                 
-                # Handle direct images
-                elif post_data.get('url', ''):
-                    url = post_data['url']
-                    if any(url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif']):
-                        media_urls.append(('image', url))
-            
-            return media_urls
+            except Exception as e:
+                st.warning(f"Error processing post: {str(e)}")
+                continue
+                
+        return media_urls
+        
+    except requests.exceptions.RequestException as e:
+        st.error(f"Failed to fetch Reddit data: {str(e)}")
+        return []
+    except json.JSONDecodeError:
+        st.error("Failed to parse Reddit API response")
+        return []
     except Exception as e:
-        st.error(f"Error processing Reddit URL: {str(e)}")
-    return []
-
+        st.error(f"Unexpected error: {str(e)}")
+        return []
 def main():
     st.title("🎯 Direct Drive Media Scraper")
     
