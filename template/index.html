@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Document</title>
+</head>
+<body>
+
+  <div>
+      <div>
+        <h1>add reddit link to scrape</h1>
+        <form action="{{ url_for('index') }}" method="POST">
+        <input type="text" name="url">
+        <label for="vidscrape">video scraping</label><input type="checkbox" name="scrape video" id="">
+        <label for="imgscrape"> image scraping</label><input type="checkbox" name="scrape image" id="">
+        <input type="button" value="submit">
+        </form>
+      </div>
+  </div>
+  <div>
+
+  </div>
+
+</body>
+</html>
