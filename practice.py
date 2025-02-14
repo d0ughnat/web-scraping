@@ -15,6 +15,12 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.http import MediaFileUpload
 import praw
 
+reddit = praw.Reddit(
+    client_id=st.secrets["reddit"]["client_id"],
+    client_secret=st.secrets["reddit"]["client_secret"],
+    user_agent=st.secrets["reddit"]["user_agent"]
+)
+
 
 # Configure Streamlit page
 st.set_page_config(
