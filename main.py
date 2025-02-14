@@ -1,9 +1,10 @@
 import streamlit as st
 import requests
 import praw
-import prawcore
 import pandas as pd
+from urllib.parse import unquote
 import time
+import prawcore
 
 # Initialize Reddit API client
 reddit = praw.Reddit(
@@ -15,11 +16,12 @@ reddit = praw.Reddit(
 # Configure Streamlit page
 st.set_page_config(
     page_title="Reddit Media Scraper",
-    page_icon="📥",
+    page_icon="\U0001F4E5",
     layout="wide"
 )
 
 def extract_media_from_submission(submission):
+    """Extract media from a single Reddit submission"""
     media_urls = []
     try:
         if hasattr(submission, 'gallery_data'):
@@ -47,15 +49,18 @@ def extract_media_from_submission(submission):
                 media_urls.append(('image', preview_url, f"{submission.id}_preview.jpg"))
             except (KeyError, IndexError):
                 pass
+
     except Exception as e:
         st.warning(f"Error processing media content for post {submission.id}: {str(e)}")
 
     return media_urls
 
 def get_subreddit_media(subreddit_name, limit=50, sort='hot'):
+    """Get media from a subreddit"""
     try:
         media_urls = []
         subreddit = reddit.subreddit(subreddit_name)
+
         try:
             subreddit._fetch()
         except prawcore.exceptions.NotFound:
@@ -75,11 +80,12 @@ def get_subreddit_media(subreddit_name, limit=50, sort='hot'):
             st.error("Invalid sorting option.")
             return []
 
-        with st.progress(0) as progress_bar:
-            for i, post in enumerate(posts):
-                progress_bar.progress((i + 1) / limit)
-                media_urls.extend(extract_media_from_submission(post))
-                time.sleep(0.1)
+        progress_bar = st.progress(0)
+        for i, post in enumerate(posts):
+            progress_bar.progress((i + 1) / limit)
+            media_urls.extend(extract_media_from_submission(post))
+            time.sleep(0.1)
+        progress_bar.empty()
 
         return list(dict.fromkeys(media_urls))
 
@@ -88,6 +94,7 @@ def get_subreddit_media(subreddit_name, limit=50, sort='hot'):
         return []
 
 def get_post_media(post_url):
+    """Get media from a specific post"""
     try:
         submission = reddit.submission(url=post_url)
         return extract_media_from_submission(submission)
@@ -96,39 +103,41 @@ def get_post_media(post_url):
         return []
 
 def main():
-    st.title("📥 Reddit Media Scraper")
+    st.title("\U0001F4E5 Reddit Media Scraper")
 
     scrape_type = st.radio("What would you like to scrape?", ["Single Post", "Subreddit"])
 
     if scrape_type == "Single Post":
         post_url = st.text_input("Enter Reddit post URL:")
-        if post_url and st.button("Scrape Post"):
-            with st.spinner("Scraping media from post..."):
-                media_urls = get_post_media(post_url)
-                if media_urls:
-                    st.success(f"Found {len(media_urls)} media files")
-                    display_media_downloads(media_urls)
-                else:
-                    st.warning("No media found in this post")
+        if post_url:
+            if st.button("Scrape Post"):
+                with st.spinner("Scraping media from post..."):
+                    media_urls = get_post_media(post_url)
+                    if media_urls:
+                        st.success(f"Found {len(media_urls)} media files")
+                        display_media_downloads(media_urls)
+                    else:
+                        st.warning("No media found in this post")
+
     else:
         col1, col2, col3 = st.columns([2, 1, 1])
+
         with col1:
-            subreddit_name = st.text_input("Enter subreddit name or URL:").strip()
-            if subreddit_name.startswith("https://www.reddit.com/r/"):
-                subreddit_name = subreddit_name.split("/r/")[1].split("/")[0]
+            subreddit_name = st.text_input("Enter subreddit name (without r/):")
         with col2:
             sort_by = st.selectbox("Sort by:", ['hot', 'new', 'top'])
         with col3:
-            limit = st.number_input("Number of posts to scan:", min_value=1, max_value=100, value=25)
+            limit = st.number_input("Number of posts to scan:", min_value=1, max_value=500, value=100)
 
-        if subreddit_name and st.button("Scrape Subreddit"):
-            with st.spinner(f"Scraping media from r/{subreddit_name}..."):
-                media_urls = get_subreddit_media(subreddit_name, limit, sort_by)
-                if media_urls:
-                    st.success(f"Found {len(media_urls)} media files")
-                    display_media_downloads(media_urls)
-                else:
-                    st.warning("No media found in this subreddit")
+        if subreddit_name:
+            if st.button("Scrape Subreddit"):
+                with st.spinner(f"Scraping media from r/{subreddit_name}..."):
+                    media_urls = get_subreddit_media(subreddit_name, limit, sort_by)
+                    if media_urls:
+                        st.success(f"Found {len(media_urls)} media files")
+                        display_media_downloads(media_urls)
+                    else:
+                        st.warning("No media found in this subreddit")
 
 def display_media_downloads(media_urls):
     df = pd.DataFrame(media_urls, columns=['Type', 'URL', 'Filename'])
@@ -138,8 +147,10 @@ def display_media_downloads(media_urls):
     col1, col2 = st.columns(2)
 
     with col1:
-        for type_, url, filename in media_urls:
-            if type_ == 'image':
+        image_urls = [(url, filename) for type_, url, filename in media_urls if type_ == 'image']
+        if image_urls:
+            st.write(f"Images found: {len(image_urls)}")
+            for url, filename in image_urls:
                 try:
                     response = requests.get(url)
                     if response.status_code == 200:
@@ -153,8 +164,10 @@ def display_media_downloads(media_urls):
                     st.error(f"Error downloading {filename}: {str(e)}")
 
     with col2:
-        for type_, url, filename in media_urls:
-            if type_ == 'video':
+        video_urls = [(url, filename) for type_, url, filename in media_urls if type_ == 'video']
+        if video_urls:
+            st.write(f"Videos found: {len(video_urls)}")
+            for url, filename in video_urls:
                 try:
                     response = requests.get(url)
                     if response.status_code == 200:
