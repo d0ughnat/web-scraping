@@ -1,5 +1,9 @@
-beautifulsoup4
-requests
 streamlit
-gspread
+requests
+beautifulsoup4
+pandas
+gdown
+google-api-python-client
 google-auth
+google-auth-oauthlib
+google-auth-httplib2
