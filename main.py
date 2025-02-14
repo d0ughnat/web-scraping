@@ -2,8 +2,7 @@ import streamlit as st
 import requests
 import praw
 import pandas as pd
-import re
-from urllib.parse import unquote, parse_qs, urlparse
+from urllib.parse import unquote
 import time
 
 # Initialize Reddit API client
@@ -15,36 +14,12 @@ reddit = praw.Reddit(
 
 # Configure Streamlit page
 st.set_page_config(
-    page_title="Reddit Media Search Downloader",
-    page_icon="🔍",
+    page_title="Reddit Media Scraper",
+    page_icon="📥",
     layout="wide"
 )
 
-# Define styles
-st.markdown("""
-    <style>
-    .main {
-        padding: 2rem;
-    }
-    .stButton>button {
-        width: 100%;
-    }
-    .success {
-        color: #28a745;
-    }
-    .error {
-        color: #dc3545;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-def extract_search_query(url):
-    """Extract search query from Reddit search URL"""
-    parsed_url = urlparse(url)
-    query_params = parse_qs(parsed_url.query)
-    return query_params.get('q', [None])[0]
-
-def get_media_from_submission(submission):
+def extract_media_from_submission(submission):
     """Extract media from a single Reddit submission"""
     media_urls = []
     try:
@@ -83,142 +58,124 @@ def get_media_from_submission(submission):
 
     return media_urls
 
-def get_reddit_search_media(query, limit=50, media_only=True):
-    """Search Reddit and extract media from results"""
+def get_subreddit_media(subreddit_name, limit=50, sort='hot'):
+    """Get media from a subreddit"""
     try:
         media_urls = []
-        search_results = []
-
-        # Use Reddit's search
-        if media_only:
-            # Search only media posts
-            search_results = reddit.subreddit('all').search(query, sort='hot', limit=limit, params={'type': 'link'})
-        else:
-            # Search all posts
-            search_results = reddit.subreddit('all').search(query, sort='hot', limit=limit)
-
+        subreddit = reddit.subreddit(subreddit_name)
+        
+        if sort == 'hot':
+            posts = subreddit.hot(limit=limit)
+        elif sort == 'new':
+            posts = subreddit.new(limit=limit)
+        elif sort == 'top':
+            posts = subreddit.top(limit=limit)
+        
         with st.progress(0) as progress_bar:
-            for i, post in enumerate(search_results):
-                # Update progress
+            for i, post in enumerate(posts):
                 progress_bar.progress((i + 1) / limit)
-                
-                # Skip non-media posts if media_only is True
-                if media_only and not (hasattr(post, 'preview') or post.is_video or 
-                                     hasattr(post, 'gallery_data') or 
-                                     (hasattr(post, 'url') and any(post.url.lower().endswith(ext) 
-                                      for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.mp4']))):
-                    continue
-                
-                media_urls.extend(get_media_from_submission(post))
+                media_urls.extend(extract_media_from_submission(post))
                 time.sleep(0.1)  # Small delay to avoid rate limiting
 
-        # Clean URLs and remove duplicates
-        cleaned_urls = []
-        seen = set()
-        for media_type, url, filename in media_urls:
-            cleaned_url = unquote(url).replace('&amp;', '&')
-            if cleaned_url not in seen:
-                seen.add(cleaned_url)
-                cleaned_urls.append((media_type, cleaned_url, filename))
-
-        return cleaned_urls
-
+        return list(dict.fromkeys(media_urls))  # Remove duplicates while preserving order
+    
     except Exception as e:
-        st.error(f"Error during search: {str(e)}")
+        st.error(f"Error accessing subreddit: {str(e)}")
+        return []
+
+def get_post_media(post_url):
+    """Get media from a specific post"""
+    try:
+        submission = reddit.submission(url=post_url)
+        return extract_media_from_submission(submission)
+    
+    except Exception as e:
+        st.error(f"Error accessing post: {str(e)}")
         return []
 
 def main():
-    st.title("🔍 Reddit Media Search Downloader")
+    st.title("📥 Reddit Media Scraper")
     
-    # Input options
-    col1, col2 = st.columns([3, 1])
+    # Input selection
+    scrape_type = st.radio("What would you like to scrape?", 
+                          ["Single Post", "Subreddit"])
+    
+    if scrape_type == "Single Post":
+        post_url = st.text_input("Enter Reddit post URL:")
+        if post_url:
+            if st.button("Scrape Post"):
+                with st.spinner("Scraping media from post..."):
+                    media_urls = get_post_media(post_url)
+                    if media_urls:
+                        st.success(f"Found {len(media_urls)} media files")
+                        display_media_downloads(media_urls)
+                    else:
+                        st.warning("No media found in this post")
+    
+    else:  # Subreddit
+        col1, col2, col3 = st.columns([2, 1, 1])
+        
+        with col1:
+            subreddit_name = st.text_input("Enter subreddit name (without r/):")
+        with col2:
+            sort_by = st.selectbox("Sort by:", ['hot', 'new', 'top'])
+        with col3:
+            limit = st.number_input("Number of posts to scan:", 
+                                  min_value=1, max_value=100, value=25)
+        
+        if subreddit_name:
+            if st.button("Scrape Subreddit"):
+                with st.spinner(f"Scraping media from r/{subreddit_name}..."):
+                    media_urls = get_subreddit_media(subreddit_name, limit, sort_by)
+                    if media_urls:
+                        st.success(f"Found {len(media_urls)} media files")
+                        display_media_downloads(media_urls)
+                    else:
+                        st.warning("No media found in this subreddit")
+
+def display_media_downloads(media_urls):
+    """Display download options for media files"""
+    # Display results in a table
+    df = pd.DataFrame(media_urls, columns=['Type', 'URL', 'Filename'])
+    st.dataframe(df[['Type', 'Filename']])
+    
+    # Add download buttons
+    st.write("Download Options:")
+    col1, col2 = st.columns(2)
     
     with col1:
-        search_input = st.text_input("Enter search term or Reddit search URL:")
+        image_urls = [(url, filename) for type_, url, filename in media_urls if type_ == 'image']
+        if image_urls:
+            st.write(f"Images found: {len(image_urls)}")
+            for url, filename in image_urls:
+                try:
+                    response = requests.get(url)
+                    if response.status_code == 200:
+                        st.download_button(
+                            label=f"Download {filename}",
+                            data=response.content,
+                            file_name=filename,
+                            mime="image/jpeg"
+                        )
+                except Exception as e:
+                    st.error(f"Error downloading {filename}: {str(e)}")
     
     with col2:
-        limit = st.number_input("Number of posts to scan:", min_value=10, max_value=100, value=50)
-    
-    media_only = st.checkbox("Only search media posts", value=True)
-    
-    if search_input:
-        # Extract query if it's a URL, otherwise use the input directly
-        if 'reddit.com/search' in search_input:
-            query = extract_search_query(search_input)
-            if not query:
-                st.error("Couldn't extract search query from URL")
-                return
-        else:
-            query = search_input
-        
-        if st.button("Search and Scan Media"):
-            with st.spinner(f"Searching Reddit for '{query}' and scanning for media..."):
-                media_urls = get_reddit_search_media(query, limit, media_only)
-                
-                if media_urls:
-                    # Display results in a table
-                    df = pd.DataFrame(media_urls, columns=['Type', 'URL', 'Filename'])
-                    st.write(f"Found {len(media_urls)} media files")
-                    st.dataframe(df[['Type', 'Filename']])
-                    
-                    # Add "Download All" buttons
-                    st.write("Download Options:")
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        # Count images
-                        image_count = sum(1 for t, _, _ in media_urls if t == 'image')
-                        if image_count > 0:
-                            if st.button(f"Download All Images ({image_count})"):
-                                for media_type, url, filename in media_urls:
-                                    if media_type == 'image':
-                                        try:
-                                            response = requests.get(url)
-                                            if response.status_code == 200:
-                                                st.download_button(
-                                                    label=f"Save {filename}",
-                                                    data=response.content,
-                                                    file_name=filename,
-                                                    mime="image/jpeg"
-                                                )
-                                        except Exception as e:
-                                            st.error(f"Error downloading {filename}: {str(e)}")
-                    
-                    with col2:
-                        # Count videos
-                        video_count = sum(1 for t, _, _ in media_urls if t == 'video')
-                        if video_count > 0:
-                            if st.button(f"Download All Videos ({video_count})"):
-                                for media_type, url, filename in media_urls:
-                                    if media_type == 'video':
-                                        try:
-                                            response = requests.get(url)
-                                            if response.status_code == 200:
-                                                st.download_button(
-                                                    label=f"Save {filename}",
-                                                    data=response.content,
-                                                    file_name=filename,
-                                                    mime="video/mp4"
-                                                )
-                                        except Exception as e:
-                                            st.error(f"Error downloading {filename}: {str(e)}")
-                    
-                    # Individual download buttons
-                    st.write("Individual Files:")
-                    for media_type, url, filename in media_urls:
-                        try:
-                            response = requests.get(url)
-                            if response.status_code == 200:
-                                st.download_button(
-                                    label=f"Download {filename}",
-                                    data=response.content,
-                                    file_name=filename,
-                                    mime=f"{'image' if media_type == 'image' else 'video'}/{'jpeg' if media_type == 'image' else 'mp4'}"
-                                )
-                        except Exception as e:
-                            st.error(f"Error downloading {filename}: {str(e)}")
-                else:
-                    st.warning("No media found in search results")
+        video_urls = [(url, filename) for type_, url, filename in media_urls if type_ == 'video']
+        if video_urls:
+            st.write(f"Videos found: {len(video_urls)}")
+            for url, filename in video_urls:
+                try:
+                    response = requests.get(url)
+                    if response.status_code == 200:
+                        st.download_button(
+                            label=f"Download {filename}",
+                            data=response.content,
+                            file_name=filename,
+                            mime="video/mp4"
+                        )
+                except Exception as e:
+                    st.error(f"Error downloading {filename}: {str(e)}")
 
 if __name__ == "__main__":
     main()
