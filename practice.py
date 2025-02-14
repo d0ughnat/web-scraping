@@ -248,12 +248,6 @@ def get_reddit_media(url, headers):
     except Exception as e:
         st.error(f"Unexpected error: {str(e)}")
         return []
-    
-reddit = praw.Reddit(
-    client_id="YOUR_CLIENT_ID",
-    client_secret="YOUR_CLIENT_SECRET",
-    user_agent="DirectDriveMediaScraper/1.0"
-)
 
 def extract_post_id(url):
     """Extract post ID from Reddit URL"""
