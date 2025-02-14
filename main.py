@@ -61,15 +61,6 @@ def get_subreddit_media(subreddit_name, limit=50, sort='hot'):
         media_urls = []
         subreddit = reddit.subreddit(subreddit_name)
 
-        try:
-            subreddit._fetch()
-        except prawcore.exceptions.NotFound:
-            st.error(f"The subreddit r/{subreddit_name} does not exist.")
-            return []
-        except prawcore.exceptions.Forbidden:
-            st.error(f"The subreddit r/{subreddit_name} is private or banned.")
-            return []
-
         if sort == 'hot':
             posts = subreddit.hot(limit=limit)
         elif sort == 'new':
@@ -89,9 +80,13 @@ def get_subreddit_media(subreddit_name, limit=50, sort='hot'):
 
         return list(dict.fromkeys(media_urls))
 
+    except prawcore.exceptions.NotFound:
+        st.error(f"The subreddit r/{subreddit_name} does not exist.")
+    except prawcore.exceptions.Forbidden:
+        st.error(f"The subreddit r/{subreddit_name} is private or banned.")
     except Exception as e:
         st.error(f"An unexpected error occurred: {str(e)}")
-        return []
+    return []
 
 def get_post_media(post_url):
     """Get media from a specific post"""
@@ -123,7 +118,7 @@ def main():
         col1, col2, col3 = st.columns([2, 1, 1])
 
         with col1:
-            subreddit_name = st.text_input("Enter subreddit name (without r/):")
+            subreddit_name = st.text_input("Enter subreddit name (without r/, e.g., 'all' for r/all):")
         with col2:
             sort_by = st.selectbox("Sort by:", ['hot', 'new', 'top'])
         with col3:
