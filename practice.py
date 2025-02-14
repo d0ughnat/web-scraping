@@ -13,6 +13,7 @@ import pandas as pd
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
 from googleapiclient.http import MediaFileUpload
+import praw
 
 
 # Configure Streamlit page
@@ -240,6 +241,87 @@ def get_reddit_media(url, headers):
     except Exception as e:
         st.error(f"Unexpected error: {str(e)}")
         return []
+    
+reddit = praw.Reddit(
+    client_id="YOUR_CLIENT_ID",
+    client_secret="YOUR_CLIENT_SECRET",
+    user_agent="DirectDriveMediaScraper/1.0"
+)
+
+def extract_post_id(url):
+    """Extract post ID from Reddit URL"""
+    patterns = [
+        r'/comments/([a-zA-Z0-9]+)/',
+        r'reddit.com/(\w+)$'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+def get_reddit_media(url, headers):
+    """Extract media from Reddit posts using PRAW"""
+    try:
+        post_id = extract_post_id(url)
+        if not post_id:
+            st.error("Could not extract post ID from URL")
+            return []
+
+        submission = reddit.submission(id=post_id)
+        media_urls = []
+
+        # Handle different types of Reddit posts
+        try:
+            # Handle galleries
+            if hasattr(submission, 'gallery_data'):
+                for item in submission.gallery_data['items']:
+                    media_id = item['media_id']
+                    metadata = submission.media_metadata[media_id]
+                    if metadata['status'] == 'valid':
+                        if metadata['e'] == 'Image':
+                            image_url = metadata['s']['u']
+                            media_urls.append(('image', image_url))
+
+            # Handle direct images
+            elif hasattr(submission, 'url'):
+                url = submission.url
+                if any(url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
+                    media_urls.append(('image', url))
+
+            # Handle videos
+            if submission.is_video and hasattr(submission, 'media'):
+                video_url = submission.media['reddit_video']['fallback_url']
+                media_urls.append(('video', video_url))
+
+            # Handle image previews
+            elif hasattr(submission, 'preview'):
+                try:
+                    preview_url = submission.preview['images'][0]['source']['url']
+                    media_urls.append(('image', preview_url))
+                except (KeyError, IndexError):
+                    pass
+
+        except Exception as e:
+            st.warning(f"Error processing media content: {str(e)}")
+
+        # Clean URLs
+        cleaned_urls = []
+        for media_type, url in media_urls:
+            cleaned_url = url.replace('&amp;', '&')
+            if ('image', cleaned_url) not in cleaned_urls:
+                cleaned_urls.append((media_type, cleaned_url))
+
+        return cleaned_urls
+
+    except praw.exceptions.PRAWException as e:
+        st.error(f"Reddit API error: {str(e)}")
+        return []
+    except Exception as e:
+        st.error(f"Unexpected error: {str(e)}")
+        return []
+
+
 def main():
     st.title("🎯 Direct Drive Media Scraper")
     
