@@ -4,6 +4,7 @@ import praw
 import pandas as pd
 from urllib.parse import unquote
 import time
+import prawcore
 
 # Initialize Reddit API client
 reddit = praw.Reddit(
@@ -58,29 +59,46 @@ def extract_media_from_submission(submission):
 
     return media_urls
 
+import prawcore
+
 def get_subreddit_media(subreddit_name, limit=50, sort='hot'):
     """Get media from a subreddit"""
     try:
         media_urls = []
         subreddit = reddit.subreddit(subreddit_name)
-        
+
+        # Check subreddit existence and access permissions
+        try:
+            subreddit._fetch()  # This triggers an API call to check if the subreddit exists
+        except prawcore.exceptions.NotFound:
+            st.error(f"The subreddit r/{subreddit_name} does not exist.")
+            return []
+        except prawcore.exceptions.Forbidden:
+            st.error(f"The subreddit r/{subreddit_name} is private or banned.")
+            return []
+
+        # Choose sorting method
         if sort == 'hot':
             posts = subreddit.hot(limit=limit)
         elif sort == 'new':
             posts = subreddit.new(limit=limit)
         elif sort == 'top':
             posts = subreddit.top(limit=limit)
-        
+        else:
+            st.error("Invalid sorting option.")
+            return []
+
+        # Process posts with progress bar
         with st.progress(0) as progress_bar:
             for i, post in enumerate(posts):
                 progress_bar.progress((i + 1) / limit)
                 media_urls.extend(extract_media_from_submission(post))
-                time.sleep(0.1)  # Small delay to avoid rate limiting
+                time.sleep(0.1)
 
         return list(dict.fromkeys(media_urls))  # Remove duplicates while preserving order
-    
+
     except Exception as e:
-        st.error(f"Error accessing subreddit: {str(e)}")
+        st.error(f"An unexpected error occurred: {str(e)}")
         return []
 
 def get_post_media(post_url):
