@@ -5,6 +5,8 @@ import pandas as pd
 from urllib.parse import unquote
 import time
 import prawcore
+import zipfile
+import io
 
 # Initialize Reddit API client
 reddit = praw.Reddit(
@@ -139,41 +141,33 @@ def display_media_downloads(media_urls):
     st.dataframe(df[['Type', 'Filename']])
 
     st.write("Download Options:")
-    col1, col2 = st.columns(2)
+    image_data = []
+    video_data = []
 
-    with col1:
-        image_urls = [(url, filename) for type_, url, filename in media_urls if type_ == 'image']
-        if image_urls:
-            st.write(f"Images found: {len(image_urls)}")
-            for url, filename in image_urls:
-                try:
-                    response = requests.get(url)
-                    if response.status_code == 200:
-                        st.download_button(
-                            label=f"Download {filename}",
-                            data=response.content,
-                            file_name=filename,
-                            mime="image/jpeg"
-                        )
-                except Exception as e:
-                    st.error(f"Error downloading {filename}: {str(e)}")
+    for type_, url, filename in media_urls:
+        try:
+            response = requests.get(url)
+            if response.status_code == 200:
+                if type_ == 'image':
+                    image_data.append((filename, response.content))
+                elif type_ == 'video':
+                    video_data.append((filename, response.content))
+        except Exception as e:
+            st.error(f"Error downloading {filename}: {str(e)}")
 
-    with col2:
-        video_urls = [(url, filename) for type_, url, filename in media_urls if type_ == 'video']
-        if video_urls:
-            st.write(f"Videos found: {len(video_urls)}")
-            for url, filename in video_urls:
-                try:
-                    response = requests.get(url)
-                    if response.status_code == 200:
-                        st.download_button(
-                            label=f"Download {filename}",
-                            data=response.content,
-                            file_name=filename,
-                            mime="video/mp4"
-                        )
-                except Exception as e:
-                    st.error(f"Error downloading {filename}: {str(e)}")
+    if image_data or video_data:
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w') as zip_file:
+            for filename, content in image_data + video_data:
+                zip_file.writestr(filename, content)
+        zip_buffer.seek(0)
+
+        st.download_button(
+            label="Download All as ZIP",
+            data=zip_buffer,
+            file_name="reddit_media.zip",
+            mime="application/zip"
+        )
 
 if __name__ == "__main__":
     main()
