@@ -226,7 +226,7 @@ def main():
             "Number of posts to scan",
             min_value=1,
             max_value=1000,
-            value=50
+            value=10
         )
 
     if subreddit_name and st.button("Scan Subreddit"):
