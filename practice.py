@@ -14,19 +14,23 @@ from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
 from googleapiclient.http import MediaFileUpload
 import praw
+import zipfile
 
+# Initialize Reddit API
 reddit = praw.Reddit(
     client_id=st.secrets["reddit"]["client_id"],
     client_secret=st.secrets["reddit"]["client_secret"],
     user_agent=st.secrets["reddit"]["user_agent"]
 )
 
+# Configure Streamlit page
 st.set_page_config(
-    page_title="Direct Drive Media Scraper",
+    page_title="Subreddit Media Scraper",
     page_icon="🎯",
     layout="wide"
 )
 
+# Define styles
 st.markdown("""
     <style>
     .main {
@@ -44,7 +48,17 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+def create_zip_file(files):
+    """Create a zip file containing downloaded media"""
+    zip_path = "downloads/media_files.zip"
+    with zipfile.ZipFile(zip_path, 'w') as zipf:
+        for file in files:
+            if os.path.exists(file):
+                zipf.write(file, os.path.basename(file))
+    return zip_path
+
 def extract_folder_id(drive_link):
+    """Extract Google Drive folder ID from URL"""
     patterns = [
         r'https://drive.google.com/drive/folders/([a-zA-Z0-9_-]+)',
         r'id=([a-zA-Z0-9_-]+)',
@@ -57,17 +71,29 @@ def extract_folder_id(drive_link):
     return None
 
 def upload_to_drive(file_path, folder_id):
+    """Upload file to Google Drive using service account"""
     try:
-        creds = Credentials.from_service_account_info(st.secrets["google_service_account"])
+        creds = Credentials.from_service_account_file('credentials.json')
         service = build('drive', 'v3', credentials=creds)
-        file_metadata = {'name': os.path.basename(file_path), 'parents': [folder_id]}
+
+        file_metadata = {
+            'name': os.path.basename(file_path),
+            'parents': [folder_id]
+        }
+
         media = MediaFileUpload(file_path, resumable=True)
-        file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+        file = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id'
+        ).execute()
+
         return f"https://drive.google.com/file/d/{file.get('id')}/view"
+
     except Exception as e:
         st.error(f"Upload error: {str(e)}")
         return None
-    
+
 def download_media(url, filename):
     """Download media file"""
     try:
@@ -86,282 +112,191 @@ def download_media(url, filename):
         st.error(f"Download error: {str(e)}")
     return None
 
-def extract_media_from_html(soup, base_url):
-    """Extract media URLs from HTML"""
-    media_urls = []
-    
-    # Find images
-    for img in soup.find_all('img'):
-        src = img.get('src') or img.get('data-src') or img.get('data-original')
-        if src:
-            width = img.get('width', '').strip('px') or '0'
-            height = img.get('height', '').strip('px') or '0'
-            try:
-                if int(width) < 50 or int(height) < 50:
-                    continue
-            except ValueError:
-                pass
-            
-            if not any(x in src.lower() for x in ['thumbnail', 'icon', 'avatar', 'emoji', 'loading']):
-                if src.startswith('//'):
-                    src = 'https:' + src
-                elif not src.startswith(('http://', 'https://')):
-                    src = urljoin(base_url, src)
-                src = src.split('?')[0]
-                media_urls.append(('image', src))
-    
-    # Find videos
-    for video in soup.find_all(['video', 'source']):
-        src = video.get('src') or video.get('data-src')
-        if src:
-            if src.startswith('//'):
-                src = 'https:' + src
-            elif not src.startswith(('http://', 'https://')):
-                src = urljoin(base_url, src)
-            media_urls.append(('video', src))
-    
-    return media_urls
-def get_reddit_media(url, headers):
-    """Extract media from Reddit posts with improved error handling and OAuth"""
+def scrape_subreddit(subreddit_name, limit, media_types, sort_by='hot'):
+    """Scrape media from an entire subreddit"""
     try:
-        # Clean and validate the URL
-        parsed = urlparse(url)
-        if not parsed.netloc.endswith('reddit.com'):
-            return []
-            
-        # Convert to JSON API URL
-        path = parsed.path.rstrip('/')
-        if not path.endswith('.json'):
-            path += '.json'
-        json_url = urlunparse(parsed._replace(path=path, query='', fragment=''))
-        
-        # Enhanced headers to mimic a real browser
-        api_headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Cache-Control': 'max-age=0',
-            'TE': 'Trailers'
-        }
-        
-        # Add random delay to avoid rate limiting
-        time.sleep(random.uniform(1, 3))
-        
-        session = requests.Session()
-        response = session.get(json_url, headers=api_headers, timeout=15)
-        response.raise_for_status()
-        
-        data = response.json()
-        if not isinstance(data, list) or not data:
-            st.error("Invalid Reddit API response format")
-            return []
-            
         media_urls = []
-        try:
-            posts = data[0]['data']['children']
-        except (KeyError, IndexError):
-            st.error("Could not find posts in Reddit API response")
-            return []
-            
+        subreddit = reddit.subreddit(subreddit_name)
+        
+        # Get posts based on sort method
+        if sort_by == 'hot':
+            posts = subreddit.hot(limit=limit)
+        elif sort_by == 'new':
+            posts = subreddit.new(limit=limit)
+        elif sort_by == 'top':
+            posts = subreddit.top(limit=limit)
+        else:
+            posts = subreddit.hot(limit=limit)
+
         for post in posts:
             try:
-                post_data = post['data']
-                
-                # Handle preview images first (often higher quality)
-                if 'preview' in post_data:
+                # Handle galleries
+                if hasattr(post, 'gallery_data') and 'images' in media_types:
+                    for item in post.gallery_data['items']:
+                        media_id = item['media_id']
+                        metadata = post.media_metadata[media_id]
+                        if metadata['status'] == 'valid' and metadata['e'] == 'Image':
+                            image_url = metadata['s']['u']
+                            media_urls.append(('image', image_url, post.title))
+
+                # Handle direct images
+                elif hasattr(post, 'url') and 'images' in media_types:
+                    url = post.url
+                    if any(url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
+                        media_urls.append(('image', url, post.title))
+
+                # Handle videos
+                if post.is_video and hasattr(post, 'media') and 'videos' in media_types:
+                    video_url = post.media['reddit_video']['fallback_url']
+                    media_urls.append(('video', video_url, post.title))
+
+                # Handle image previews
+                elif hasattr(post, 'preview') and 'images' in media_types:
                     try:
-                        images = post_data['preview']['images']
-                        for image in images:
-                            image_url = image['source']['url']
-                            image_url = unquote(image_url).replace('&amp;', '&')
-                            media_urls.append(('image', image_url))
-                            break  # Take only the first image from preview
+                        preview_url = post.preview['images'][0]['source']['url']
+                        media_urls.append(('image', preview_url, post.title))
                     except (KeyError, IndexError):
                         pass
-                
-                # Handle images in post content
-                if 'url_overridden_by_dest' in post_data:
-                    url = post_data['url_overridden_by_dest']
-                    if any(url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
-                        url = unquote(url).replace('&amp;', '&')
-                        if ('image', url) not in media_urls:  # Avoid duplicates
-                            media_urls.append(('image', url))
-                
-                # Handle videos
-                if post_data.get('is_video', False) and 'media' in post_data:
-                    video_data = post_data['media'].get('reddit_video', {})
-                    video_url = video_data.get('fallback_url')
-                    if video_url:
-                        video_url = unquote(video_url).replace('&amp;', '&')
-                        media_urls.append(('video', video_url.split('?')[0]))
-                
-                # Handle galleries
-                if post_data.get('is_gallery', False) and 'media_metadata' in post_data:
-                    for media_id, media in post_data['media_metadata'].items():
-                        if media.get('status') == 'valid':
-                            if media.get('e') == 'Image':
-                                image_data = media.get('s', {})
-                                image_url = image_data.get('u', '')
-                                if image_url:
-                                    image_url = unquote(image_url).replace('&amp;', '&')
-                                    media_urls.append(('image', image_url))
-            
+
+                time.sleep(0.5)  # Rate limiting
+
             except Exception as e:
                 st.warning(f"Error processing post: {str(e)}")
                 continue
-                
-        return media_urls
-        
-    except requests.exceptions.RequestException as e:
-        if '403' in str(e):
-            st.error("Access denied by Reddit. This might be due to the post being private or removed.")
-        else:
-            st.error(f"Failed to fetch Reddit data: {str(e)}")
-        return []
-    except json.JSONDecodeError:
-        st.error("Failed to parse Reddit API response")
-        return []
-    except Exception as e:
-        st.error(f"Unexpected error: {str(e)}")
-        return []
 
-def extract_post_id(url):
-    """Extract post ID from Reddit URL"""
-    patterns = [
-        r'/comments/([a-zA-Z0-9]+)/',
-        r'reddit.com/(\w+)$'
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
-
-def get_reddit_media(url, headers):
-    """Extract media from Reddit posts using PRAW"""
-    try:
-        post_id = extract_post_id(url)
-        if not post_id:
-            st.error("Could not extract post ID from URL")
-            return []
-
-        submission = reddit.submission(id=post_id)
-        media_urls = []
-
-        # Handle different types of Reddit posts
-        try:
-            # Handle galleries
-            if hasattr(submission, 'gallery_data'):
-                for item in submission.gallery_data['items']:
-                    media_id = item['media_id']
-                    metadata = submission.media_metadata[media_id]
-                    if metadata['status'] == 'valid':
-                        if metadata['e'] == 'Image':
-                            image_url = metadata['s']['u']
-                            media_urls.append(('image', image_url))
-
-            # Handle direct images
-            elif hasattr(submission, 'url'):
-                url = submission.url
-                if any(url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
-                    media_urls.append(('image', url))
-
-            # Handle videos
-            if submission.is_video and hasattr(submission, 'media'):
-                video_url = submission.media['reddit_video']['fallback_url']
-                media_urls.append(('video', video_url))
-
-            # Handle image previews
-            elif hasattr(submission, 'preview'):
-                try:
-                    preview_url = submission.preview['images'][0]['source']['url']
-                    media_urls.append(('image', preview_url))
-                except (KeyError, IndexError):
-                    pass
-
-        except Exception as e:
-            st.warning(f"Error processing media content: {str(e)}")
-
-        # Clean URLs
+        # Clean URLs and remove duplicates
         cleaned_urls = []
-        for media_type, url in media_urls:
-            cleaned_url = url.replace('&amp;', '&')
-            if ('image', cleaned_url) not in cleaned_urls:
-                cleaned_urls.append((media_type, cleaned_url))
+        seen = set()
+        for media_type, url, title in media_urls:
+            cleaned_url = unquote(url).replace('&amp;', '&')
+            if cleaned_url not in seen:
+                seen.add(cleaned_url)
+                cleaned_urls.append((media_type, cleaned_url, title))
 
         return cleaned_urls
 
-    except praw.exceptions.PRAWException as e:
-        st.error(f"Reddit API error: {str(e)}")
-        return []
     except Exception as e:
-        st.error(f"Unexpected error: {str(e)}")
+        st.error(f"Error scraping subreddit: {str(e)}")
         return []
-
 
 def main():
-    st.title("🎯 Direct Drive Media Scraper")
+    st.title("🎯 Subreddit Media Scraper")
     
-    # Get Drive folder link
-    drive_link = st.text_input("Paste Google Drive folder link (set sharing to 'Anyone with the link can edit'):")
-    folder_id = extract_folder_id(drive_link) if drive_link else None
-
-    # Main scraping functionality
-    url = st.text_input("Enter URL to scrape:")
+    # Download option selection
+    download_option = st.radio(
+        "Choose download option:",
+        ["Local Download", "Google Drive Upload"]
+    )
     
-    if url:
-        if st.button("Scan for Media"):
-            with st.spinner("Scanning for media..."):
-                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-                media_urls = []
+    # Show Drive folder input only if Drive option is selected
+    if download_option == "Google Drive Upload":
+        drive_link = st.text_input("Paste Google Drive folder link (set sharing to 'Anyone with the link can edit'):")
+        folder_id = extract_folder_id(drive_link) if drive_link else None
+    else:
+        folder_id = None
 
-                if 'reddit.com' in url:
-                    media_urls.extend(get_reddit_media(url, headers))
-                else:
-                    try:
-                        response = requests.get(url, headers=headers)
-                        if response.status_code == 200:
-                            soup = BeautifulSoup(response.text, 'html.parser')
-                            media_urls.extend(extract_media_from_html(soup, url))
-                    except Exception as e:
-                        st.error(f"Error: {str(e)}")
+    # Subreddit input
+    subreddit_name = st.text_input("Enter subreddit name (without r/):")
+    
+    # Media type selection
+    media_types = st.multiselect(
+        "Select media types to scrape",
+        ["images", "videos"],
+        default=["images"]
+    )
 
-                # Remove duplicates and show results
-                seen = set()
-                media_urls = [x for x in media_urls if not (x[1] in seen or seen.add(x[1]))]
-                st.session_state.media_urls = media_urls
+    # Post sorting and limit
+    col1, col2 = st.columns(2)
+    with col1:
+        sort_by = st.selectbox(
+            "Sort posts by",
+            ["hot", "new", "top"]
+        )
+    with col2:
+        post_limit = st.number_input(
+            "Number of posts to scan",
+            min_value=1,
+            max_value=1000,
+            value=50
+        )
 
-                # Display results
-                if media_urls:
-                    df = pd.DataFrame(media_urls, columns=['Type', 'URL'])
-                    st.dataframe(df)
-                else:
-                    st.warning("No media found")
+    if subreddit_name and st.button("Scan Subreddit"):
+        with st.spinner(f"Scanning r/{subreddit_name} for media..."):
+            media_urls = scrape_subreddit(subreddit_name, post_limit, media_types, sort_by)
+            st.session_state.media_urls = media_urls
 
-    # Download and upload section
-    if st.session_state.get('media_urls') and folder_id:
-        if st.button("Save to Google Drive"):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            total = len(st.session_state.media_urls)
-            
-            for idx, (media_type, url) in enumerate(st.session_state.media_urls):
-                filename = f"{media_type}_{hashlib.md5(url.encode()).hexdigest()[:8]}{os.path.splitext(url)[1]}"
-                filepath = download_media(url, filename)
+            # Display results
+            if media_urls:
+                df = pd.DataFrame(media_urls, columns=['Type', 'URL', 'Post Title'])
+                st.dataframe(df)
+                st.success(f"Found {len(media_urls)} media items")
+            else:
+                st.warning("No media found")
+
+    # Download section
+    if st.session_state.get('media_urls'):
+        if download_option == "Google Drive Upload" and folder_id:
+            if st.button("Save to Google Drive"):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                total = len(st.session_state.media_urls)
                 
-                if filepath:
-                    drive_link = upload_to_drive(filepath, folder_id)
-                    os.remove(filepath)
-                    if drive_link:
-                        st.markdown(f"✅ [Uploaded: {filename}]({drive_link})")
+                for idx, (media_type, url, title) in enumerate(st.session_state.media_urls):
+                    safe_title = re.sub(r'[^\w\-_]', '_', title)[:50]
+                    ext = os.path.splitext(url)[1] or ('.mp4' if media_type == 'video' else '.jpg')
+                    filename = f"{safe_title}_{hashlib.md5(url.encode()).hexdigest()[:8]}{ext}"
+                    
+                    filepath = download_media(url, filename)
+                    
+                    if filepath:
+                        drive_link = upload_to_drive(filepath, folder_id)
+                        os.remove(filepath)
+                        if drive_link:
+                            st.markdown(f"✅ [Uploaded: {filename}]({drive_link})")
+                    
+                    progress_bar.progress((idx + 1) / total)
+                    status_text.text(f"Processed {idx + 1}/{total} files")
                 
-                progress_bar.progress((idx + 1) / total)
-                status_text.text(f"Processed {idx + 1}/{total} files")
-            
-            status_text.text("Processing complete!")
+                status_text.text("Processing complete!")
+        
+        elif download_option == "Local Download":
+            if st.button("Download Files"):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                total = len(st.session_state.media_urls)
+                downloaded_files = []
+                
+                for idx, (media_type, url, title) in enumerate(st.session_state.media_urls):
+                    safe_title = re.sub(r'[^\w\-_]', '_', title)[:50]
+                    ext = os.path.splitext(url)[1] or ('.mp4' if media_type == 'video' else '.jpg')
+                    filename = f"{safe_title}_{hashlib.md5(url.encode()).hexdigest()[:8]}{ext}"
+                    
+                    filepath = download_media(url, filename)
+                    if filepath:
+                        downloaded_files.append(filepath)
+                        st.markdown(f"✅ Downloaded: {filename}")
+                    
+                    progress_bar.progress((idx + 1) / total)
+                    status_text.text(f"Downloaded {idx + 1}/{total} files")
+                
+                if downloaded_files:
+                    zip_path = create_zip_file(downloaded_files)
+                    with open(zip_path, "rb") as fp:
+                        st.download_button(
+                            label="Download ZIP file",
+                            data=fp,
+                            file_name="media_files.zip",
+                            mime="application/zip"
+                        )
+                    
+                    # Clean up downloaded files
+                    for file in downloaded_files:
+                        if os.path.exists(file):
+                            os.remove(file)
+                    if os.path.exists(zip_path):
+                        os.remove(zip_path)
+                
+                status_text.text("Download complete!")
 
 if __name__ == "__main__":
     main()
