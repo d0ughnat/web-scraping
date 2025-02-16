@@ -70,28 +70,18 @@ def extract_folder_id(drive_link):
             return match.group(1)
     return None
 
+import streamlit as st
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+import os
+
 def upload_to_drive(file_path, folder_id):
     """Upload file to Google Drive using service account"""
     try:
-        # Changed from credentials.json to credentials.toml
-        with open('credentials.toml', 'r') as f:
-            creds_data = toml.load(f)
-        
-        # Convert TOML data to service account info format
-        service_account_info = {
-            "type": creds_data["type"],
-            "project_id": creds_data["project_id"],
-            "private_key_id": creds_data["private_key_id"],
-            "private_key": creds_data["private_key"],
-            "client_email": creds_data["client_email"],
-            "client_id": creds_data["client_id"],
-            "auth_uri": creds_data["auth_uri"],
-            "token_uri": creds_data["token_uri"],
-            "auth_provider_x509_cert_url": creds_data["auth_provider_x509_cert_url"],
-            "client_x509_cert_url": creds_data["client_x509_cert_url"]
-        }
-        
-        creds = Credentials.from_service_account_info(service_account_info)
+        creds_data = st.secrets["gcp_service_account"]
+
+        creds = Credentials.from_service_account_info(dict(creds_data))
         service = build('drive', 'v3', credentials=creds)
 
         file_metadata = {
@@ -111,6 +101,7 @@ def upload_to_drive(file_path, folder_id):
     except Exception as e:
         st.error(f"Upload error: {str(e)}")
         return None
+
 
 def download_media(url, filename):
     """Download media file"""
