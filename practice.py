@@ -15,22 +15,18 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.http import MediaFileUpload
 import praw
 
-
 reddit = praw.Reddit(
     client_id=st.secrets["reddit"]["client_id"],
     client_secret=st.secrets["reddit"]["client_secret"],
     user_agent=st.secrets["reddit"]["user_agent"]
 )
 
-
-# Configure Streamlit page
 st.set_page_config(
     page_title="Direct Drive Media Scraper",
     page_icon="🎯",
     layout="wide"
 )
 
-# Define styles
 st.markdown("""
     <style>
     .main {
@@ -49,7 +45,6 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 def extract_folder_id(drive_link):
-    """Extract Google Drive folder ID from URL"""
     patterns = [
         r'https://drive.google.com/drive/folders/([a-zA-Z0-9_-]+)',
         r'id=([a-zA-Z0-9_-]+)',
@@ -62,33 +57,17 @@ def extract_folder_id(drive_link):
     return None
 
 def upload_to_drive(file_path, folder_id):
-    """Upload file to Google Drive using service account"""
     try:
-        # Authenticate using service account credentials
-        creds = Credentials.from_service_account_file('credentials.json')
+        creds = Credentials.from_service_account_info(st.secrets["google_service_account"])
         service = build('drive', 'v3', credentials=creds)
-
-        # Prepare metadata
-        file_metadata = {
-            'name': os.path.basename(file_path),
-            'parents': [folder_id]
-        }
-
+        file_metadata = {'name': os.path.basename(file_path), 'parents': [folder_id]}
         media = MediaFileUpload(file_path, resumable=True)
-
-        # Upload file
-        file = service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id'
-        ).execute()
-
+        file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
         return f"https://drive.google.com/file/d/{file.get('id')}/view"
-
     except Exception as e:
         st.error(f"Upload error: {str(e)}")
         return None
-
+    
 def download_media(url, filename):
     """Download media file"""
     try:
