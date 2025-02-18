@@ -70,11 +70,6 @@ def extract_folder_id(drive_link):
             return match.group(1)
     return None
 
-import streamlit as st
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
-import os
 
 def upload_to_drive(file_path, folder_id):
     """Upload file to Google Drive using service account"""
@@ -121,8 +116,18 @@ def download_media(url, filename):
         st.error(f"Download error: {str(e)}")
     return None
 
-def scrape_subreddit(subreddit_name, limit, media_types, sort_by='hot'):
-    """Scrape media from an entire subreddit"""
+def scrape_subreddit(subreddit_name, limit, sort_by='hot'):
+    """
+    Scrape audio and video content from a subreddit
+    
+    Parameters:
+    subreddit_name (str): Name of the subreddit to scrape
+    limit (int): Maximum number of posts to process
+    sort_by (str): How to sort posts ('hot', 'new', 'top')
+    
+    Returns:
+    list: List of tuples containing (media_type, url, title)
+    """
     try:
         media_urls = []
         subreddit = reddit.subreddit(subreddit_name)
@@ -139,36 +144,33 @@ def scrape_subreddit(subreddit_name, limit, media_types, sort_by='hot'):
 
         for post in posts:
             try:
-                # Handle galleries
-                if hasattr(post, 'gallery_data') and 'images' in media_types:
-                    for item in post.gallery_data['items']:
-                        media_id = item['media_id']
-                        metadata = post.media_metadata[media_id]
-                        if metadata['status'] == 'valid' and metadata['e'] == 'Image':
-                            image_url = metadata['s']['u']
-                            media_urls.append(('image', image_url, post.title))
-
-                # Handle direct images
-                elif hasattr(post, 'url') and 'images' in media_types:
-                    url = post.url
-                    if any(url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
-                        media_urls.append(('image', url, post.title))
-
-                # Handle videos
-                if post.is_video and hasattr(post, 'media') and 'videos' in media_types:
+                # Handle Reddit-hosted videos
+                if post.is_video and hasattr(post, 'media'):
                     video_url = post.media['reddit_video']['fallback_url']
                     media_urls.append(('video', video_url, post.title))
-
-                # Handle image previews
-                elif hasattr(post, 'preview') and 'images' in media_types:
-                    try:
-                        preview_url = post.preview['images'][0]['source']['url']
-                        media_urls.append(('image', preview_url, post.title))
-                    except (KeyError, IndexError):
-                        pass
-
+                    
+                    # Get associated audio for Reddit videos
+                    audio_url = video_url.rsplit('_', 1)[0] + '_audio.mp4'
+                    media_urls.append(('audio', audio_url, post.title))
+                
+                # Handle direct audio posts
+                elif hasattr(post, 'url'):
+                    url = post.url.lower()
+                    if any(url.endswith(ext) for ext in ['.mp3', '.wav', '.ogg', '.m4a']):
+                        media_urls.append(('audio', url, post.title))
+                    elif any(url.endswith(ext) for ext in ['.mp4', '.mov', '.webm']):
+                        media_urls.append(('video', url, post.title))
+                
+                # Handle third-party media hosts
+                if hasattr(post, 'media') and post.media:
+                    domain = post.domain.lower()
+                    if any(host in domain for host in ['youtube.com', 'youtu.be']):
+                        media_urls.append(('video', post.url, post.title))
+                    elif any(host in domain for host in ['soundcloud.com', 'spotify.com']):
+                        media_urls.append(('audio', post.url, post.title))
+                
                 time.sleep(0.5)  # Rate limiting
-
+            
             except Exception as e:
                 st.warning(f"Error processing post: {str(e)}")
                 continue
@@ -181,7 +183,7 @@ def scrape_subreddit(subreddit_name, limit, media_types, sort_by='hot'):
             if cleaned_url not in seen:
                 seen.add(cleaned_url)
                 cleaned_urls.append((media_type, cleaned_url, title))
-
+        
         return cleaned_urls
 
     except Exception as e:
