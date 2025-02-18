@@ -116,13 +116,14 @@ def download_media(url, filename):
         st.error(f"Download error: {str(e)}")
     return None
 
-def scrape_subreddit(subreddit_name, limit, sort_by='hot'):
+def scrape_subreddit(subreddit_name, limit, media_types=None, sort_by='hot'):
     """
     Scrape audio and video content from a subreddit
     
     Parameters:
     subreddit_name (str): Name of the subreddit to scrape
     limit (int): Maximum number of posts to process
+    media_types (list): List of media types to scrape (only 'audio' and 'video' are supported)
     sort_by (str): How to sort posts ('hot', 'new', 'top')
     
     Returns:
@@ -131,6 +132,10 @@ def scrape_subreddit(subreddit_name, limit, sort_by='hot'):
     try:
         media_urls = []
         subreddit = reddit.subreddit(subreddit_name)
+        
+        # Set default media types if none provided
+        if media_types is None:
+            media_types = ['audio', 'video']
         
         # Get posts based on sort method
         if sort_by == 'hot':
@@ -145,28 +150,29 @@ def scrape_subreddit(subreddit_name, limit, sort_by='hot'):
         for post in posts:
             try:
                 # Handle Reddit-hosted videos
-                if post.is_video and hasattr(post, 'media'):
+                if post.is_video and hasattr(post, 'media') and 'video' in media_types:
                     video_url = post.media['reddit_video']['fallback_url']
                     media_urls.append(('video', video_url, post.title))
                     
                     # Get associated audio for Reddit videos
-                    audio_url = video_url.rsplit('_', 1)[0] + '_audio.mp4'
-                    media_urls.append(('audio', audio_url, post.title))
+                    if 'audio' in media_types:
+                        audio_url = video_url.rsplit('_', 1)[0] + '_audio.mp4'
+                        media_urls.append(('audio', audio_url, post.title))
                 
                 # Handle direct audio posts
                 elif hasattr(post, 'url'):
                     url = post.url.lower()
-                    if any(url.endswith(ext) for ext in ['.mp3', '.wav', '.ogg', '.m4a']):
+                    if 'audio' in media_types and any(url.endswith(ext) for ext in ['.mp3', '.wav', '.ogg', '.m4a']):
                         media_urls.append(('audio', url, post.title))
-                    elif any(url.endswith(ext) for ext in ['.mp4', '.mov', '.webm']):
+                    elif 'video' in media_types and any(url.endswith(ext) for ext in ['.mp4', '.mov', '.webm']):
                         media_urls.append(('video', url, post.title))
                 
                 # Handle third-party media hosts
                 if hasattr(post, 'media') and post.media:
                     domain = post.domain.lower()
-                    if any(host in domain for host in ['youtube.com', 'youtu.be']):
+                    if 'video' in media_types and any(host in domain for host in ['youtube.com', 'youtu.be']):
                         media_urls.append(('video', post.url, post.title))
-                    elif any(host in domain for host in ['soundcloud.com', 'spotify.com']):
+                    elif 'audio' in media_types and any(host in domain for host in ['soundcloud.com', 'spotify.com']):
                         media_urls.append(('audio', post.url, post.title))
                 
                 time.sleep(0.5)  # Rate limiting
@@ -190,6 +196,8 @@ def scrape_subreddit(subreddit_name, limit, sort_by='hot'):
         st.error(f"Error scraping subreddit: {str(e)}")
         return []
 
+
+        
 def main():
     st.title("🎯 Subreddit Media Scraper")
     
