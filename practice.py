@@ -117,131 +117,99 @@ def download_media(url, filename):
     return None
 
 def scrape_subreddit(subreddit_name, limit, media_types=None, sort_by='hot'):
-    """
-    Scrape media from a subreddit including images, videos, and audio
-    
-    Parameters:
-    subreddit_name (str): Name of the subreddit to scrape
-    limit (int): Maximum number of posts to process
-    media_types (list): List of media types to scrape ('images', 'audio', 'video')
-    sort_by (str): How to sort posts ('hot', 'new', 'top')
-    
-    Returns:
-    list: List of tuples containing (media_type, url, title)
-    """
     try:
         media_urls = []
         st.info(f"Starting to scrape r/{subreddit_name}")
-        
-        # Set default media types if none provided
+
         if media_types is None:
             media_types = ['images', 'audio', 'video']
-        st.info(f"Scraping for media types: {media_types}")
-        
+
         subreddit = reddit.subreddit(subreddit_name)
-        
-        # Get posts based on sort method
+
         if sort_by == 'hot':
-            posts = list(subreddit.hot(limit=limit))
+            posts = subreddit.hot(limit=limit)
         elif sort_by == 'new':
-            posts = list(subreddit.new(limit=limit))
+            posts = subreddit.new(limit=limit)
         elif sort_by == 'top':
-            posts = list(subreddit.top(limit=limit))
+            posts = subreddit.top(limit=limit)
         else:
-            posts = list(subreddit.hot(limit=limit))
-            
-        st.info(f"Found {len(posts)} posts to process")
+            posts = subreddit.hot(limit=limit)
+
+        st.info(f"Processing {limit} posts from r/{subreddit_name}")
 
         for post in posts:
             try:
-                st.write(f"Processing post: {post.title[:50]}...")
-                
-                # Handle galleries
-                if hasattr(post, 'gallery_data') and 'images' in media_types:
-                    try:
-                        for item in post.gallery_data['items']:
-                            media_id = item['media_id']
-                            metadata = post.media_metadata[media_id]
-                            if metadata['status'] == 'valid' and metadata['e'] == 'Image':
-                                image_url = metadata['s']['u']
-                                media_urls.append(('image', image_url, post.title))
-                                st.write(f"Found gallery image: {image_url[:50]}...")
-                    except Exception as e:
-                        st.warning(f"Error processing gallery: {str(e)}")
+                st.write(f"Checking post: {post.title[:50]}...")
 
-                # Handle Reddit-hosted videos
-                if hasattr(post, 'is_video') and post.is_video and hasattr(post, 'media') and post.media:
-                    if 'video' in media_types:
-                        try:
-                            video_url = post.media['reddit_video']['fallback_url']
-                            media_urls.append(('video', video_url, post.title))
-                            st.write(f"Found Reddit video: {video_url[:50]}...")
-                            
-                            # Get associated audio for Reddit videos
-                            if 'audio' in media_types:
-                                audio_url = video_url.rsplit('_', 1)[0] + '_audio.mp4'
-                                media_urls.append(('audio', audio_url, post.title))
-                                st.write(f"Found Reddit audio: {audio_url[:50]}...")
-                        except Exception as e:
-                            st.warning(f"Error extracting Reddit video: {str(e)}")
-                
-                # Handle direct media posts
-                if hasattr(post, 'url'):
-                    url = post.url.lower()
-                    # Images
-                    if 'images' in media_types and any(url.endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
-                        media_urls.append(('image', post.url, post.title))
-                        st.write(f"Found direct image: {post.url[:50]}...")
-                    # Audio files
-                    elif 'audio' in media_types and any(url.endswith(ext) for ext in ['.mp3', '.wav', '.ogg', '.m4a']):
-                        media_urls.append(('audio', url, post.title))
-                        st.write(f"Found direct audio: {url[:50]}...")
-                    # Video files
-                    elif 'video' in media_types and any(url.endswith(ext) for ext in ['.mp4', '.mov', '.webm']):
-                        media_urls.append(('video', url, post.title))
-                        st.write(f"Found direct video: {url[:50]}...")
-                
-                # Handle third-party media hosts
-                if hasattr(post, 'media') and post.media and hasattr(post, 'domain'):
-                    domain = post.domain.lower()
-                    # YouTube videos
-                    if 'video' in media_types and ('youtube.com' in domain or 'youtu.be' in domain):
-                        media_urls.append(('video', post.url, post.title))
-                        st.write(f"Found YouTube video: {post.url[:50]}...")
-                    # Audio platforms
-                    elif 'audio' in media_types and ('soundcloud.com' in domain or 'spotify.com' in domain):
-                        media_urls.append(('audio', post.url, post.title))
-                        st.write(f"Found audio platform link: {post.url[:50]}...")
-                
-                # Handle image previews
+                # Gallery images
+                if hasattr(post, 'gallery_data') and 'images' in media_types:
+                    for item in post.gallery_data['items']:
+                        media_id = item['media_id']
+                        metadata = post.media_metadata[media_id]
+                        if metadata['status'] == 'valid' and metadata['e'] == 'Image':
+                            image_url = metadata['s']['u'].replace('&amp;', '&')
+                            media_urls.append(('image', image_url, post.title))
+
+                # Reddit-hosted videos
+                if hasattr(post, 'is_video') and post.is_video and 'video' in media_types:
+                    try:
+                        video_url = post.media['reddit_video']['fallback_url']
+                        media_urls.append(('video', video_url, post.title))
+
+                        # Extract audio URL
+                        if 'audio' in media_types:
+                            audio_url = video_url.rsplit('/', 1)[0] + '/DASH_audio.mp4'
+                            media_urls.append(('audio', audio_url, post.title))
+                    except Exception as e:
+                        st.warning(f"Video extraction failed: {e}")
+
+                # Direct images
+                if 'images' in media_types and any(post.url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
+                    media_urls.append(('image', post.url, post.title))
+
+                # Direct audio files
+                if 'audio' in media_types and any(post.url.lower().endswith(ext) for ext in ['.mp3', '.wav', '.ogg', '.m4a']):
+                    media_urls.append(('audio', post.url, post.title))
+
+                # Direct video files
+                if 'video' in media_types and any(post.url.lower().endswith(ext) for ext in ['.mp4', '.mov', '.webm']):
+                    media_urls.append(('video', post.url, post.title))
+
+                # YouTube videos
+                if 'video' in media_types and 'youtube.com' in post.url or 'youtu.be' in post.url:
+                    media_urls.append(('video', post.url, post.title))
+
+                # SoundCloud or Spotify links
+                if 'audio' in media_types and ('soundcloud.com' in post.url or 'spotify.com' in post.url):
+                    media_urls.append(('audio', post.url, post.title))
+
+                # Preview images
                 if hasattr(post, 'preview') and 'images' in media_types:
                     try:
-                        preview_url = post.preview['images'][0]['source']['url']
+                        preview_url = post.preview['images'][0]['source']['url'].replace('&amp;', '&')
                         media_urls.append(('image', preview_url, post.title))
-                        st.write(f"Found preview image: {preview_url[:50]}...")
-                    except (KeyError, IndexError) as e:
-                        st.warning(f"Error processing preview image: {str(e)}")
-                
-                time.sleep(0.5)  # Rate limiting
-            
-            except Exception as e:
-                st.warning(f"Error processing post: {str(e)}")
-                continue
+                    except (KeyError, IndexError):
+                        pass
 
-        # Clean URLs and remove duplicates
+                time.sleep(0.5)
+
+            except Exception as e:
+                st.warning(f"Error processing post: {e}")
+
+        # Remove duplicates
         cleaned_urls = []
-        seen = set()
+        seen_urls = set()
         for media_type, url, title in media_urls:
-            cleaned_url = unquote(url).replace('&amp;', '&')
-            if cleaned_url not in seen:
-                seen.add(cleaned_url)
-                cleaned_urls.append((media_type, cleaned_url, title))
-        
-        st.success(f"Successfully scraped {len(cleaned_urls)} media items")
+            url = unquote(url).replace('&amp;', '&')
+            if url not in seen_urls:
+                seen_urls.add(url)
+                cleaned_urls.append((media_type, url, title))
+
+        st.success(f"Scraped {len(cleaned_urls)} media items from r/{subreddit_name}")
         return cleaned_urls
 
     except Exception as e:
-        st.error(f"Error scraping subreddit: {str(e)}")
+        st.error(f"Scraping failed: {e}")
         return []
 
 def main():
