@@ -244,24 +244,45 @@ def batch_download_media(media_posts, progress_placeholder, progress_bar):
 def extract_folder_id(drive_link):
     """Extract Google Drive folder ID from URL"""
     patterns = [
-        r'https://drive.google.com/drive/folders/([a-zA-Z0-9_-]+)',
+        r'https://drive\.google\.com/drive/folders/([a-zA-Z0-9_-]+)(?:\?.*)?$',
         r'id=([a-zA-Z0-9_-]+)',
-        r'folders/([a-zA-Z0-9_-]+)'
+        r'folders/([a-zA-Z0-9_-]+)(?:\?.*)?$',
+        r'open\?id=([a-zA-Z0-9_-]+)',
+        r'1([a-zA-Z0-9_-]{33})'  # Direct folder ID format
     ]
+    
     for pattern in patterns:
         match = re.search(pattern, drive_link)
         if match:
-            return match.group(1)
+            folder_id = match.group(1)
+            # Clean up any remaining URL parameters
+            folder_id = folder_id.split('?')[0]
+            return folder_id
     return None
-
 
 def upload_to_drive(file_path, folder_id):
     """Upload file to Google Drive using service account"""
     try:
-        creds_data = st.secrets["gcp_service_account"]
+        # Validate folder ID format
+        if not re.match(r'^[a-zA-Z0-9_-]+$', folder_id):
+            raise ValueError("Invalid folder ID format")
 
-        creds = Credentials.from_service_account_info(dict(creds_data))
-        service = build('drive', 'v3', credentials=creds)
+        creds_data = st.secrets["gcp_service_account"]
+        credentials = service_account.Credentials.from_service_account_info(
+            creds_data,
+            scopes=['https://www.googleapis.com/auth/drive.file']
+        )
+        
+        service = build('drive', 'v3', credentials=credentials)
+
+        # Verify folder exists
+        try:
+            service.files().get(fileId=folder_id).execute()
+        except HttpError as error:
+            if error.resp.status == 404:
+                raise ValueError(f"Folder not found: {folder_id}")
+            else:
+                raise
 
         file_metadata = {
             'name': os.path.basename(file_path),
@@ -277,6 +298,9 @@ def upload_to_drive(file_path, folder_id):
 
         return f"https://drive.google.com/file/d/{file.get('id')}/view"
 
+    except ValueError as e:
+        st.error(f"Drive configuration error: {str(e)}")
+        return None
     except Exception as e:
         st.error(f"Upload error: {str(e)}")
         return None
@@ -294,6 +318,9 @@ def upload_zip_to_drive(zip_data, filename, folder_id):
         
         # Clean up
         os.unlink(temp_path)
+        
+        if not drive_url:
+            raise Exception("Failed to upload to Drive")
         
         return drive_url
 
