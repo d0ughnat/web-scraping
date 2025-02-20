@@ -241,11 +241,25 @@ def batch_download_media(media_posts, progress_placeholder, progress_bar):
     
     return zip_buffer.getvalue()
 
+def extract_folder_id(drive_link):
+    """Extract Google Drive folder ID from URL"""
+    patterns = [
+        r'https://drive.google.com/drive/folders/([a-zA-Z0-9_-]+)',
+        r'id=([a-zA-Z0-9_-]+)',
+        r'folders/([a-zA-Z0-9_-]+)'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, drive_link)
+        if match:
+            return match.group(1)
+    return None
+
+
 def upload_to_drive(file_path, folder_id):
     """Upload file to Google Drive using service account"""
     try:
         creds_data = st.secrets["gcp_service_account"]
-        
+
         creds = Credentials.from_service_account_info(dict(creds_data))
         service = build('drive', 'v3', credentials=creds)
 
