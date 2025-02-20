@@ -269,37 +269,59 @@ def upload_to_drive(file_path, folder_id):
 
         creds_data = st.secrets["gcp_service_account"]
         credentials = service_account.Credentials.from_service_account_info(
-            creds_data,
-            scopes=['https://www.googleapis.com/auth/drive.file']
+            dict(creds_data),
+            scopes=[
+                'https://www.googleapis.com/auth/drive.file',
+                'https://www.googleapis.com/auth/drive.metadata.readonly'
+            ]
         )
         
         service = build('drive', 'v3', credentials=credentials)
 
-        # Verify folder exists
+        # First, verify the folder exists and is accessible
         try:
-            service.files().get(fileId=folder_id).execute()
+            folder = service.files().get(
+                fileId=folder_id,
+                fields='id, name, mimeType'
+            ).execute()
+            
+            if folder['mimeType'] != 'application/vnd.google-apps.folder':
+                raise ValueError("The provided ID is not a folder")
+                
         except HttpError as error:
             if error.resp.status == 404:
-                raise ValueError(f"Folder not found: {folder_id}")
+                raise ValueError(f"Folder not found. Please check the folder ID and make sure the service account has access to it.")
             else:
                 raise
 
+        # Proceed with file upload
         file_metadata = {
             'name': os.path.basename(file_path),
             'parents': [folder_id]
         }
 
-        media = MediaFileUpload(file_path, resumable=True)
+        media = MediaFileUpload(
+            file_path,
+            resumable=True,
+            chunksize=1024*1024
+        )
+
+        # Create the file with progress tracking
         file = service.files().create(
             body=file_metadata,
             media_body=media,
-            fields='id'
+            fields='id, webViewLink',
+            supportsAllDrives=True
         ).execute()
 
+        # Return the shareable link
         return f"https://drive.google.com/file/d/{file.get('id')}/view"
 
     except ValueError as e:
         st.error(f"Drive configuration error: {str(e)}")
+        return None
+    except HttpError as e:
+        st.error(f"Google Drive API error: {str(e)}")
         return None
     except Exception as e:
         st.error(f"Upload error: {str(e)}")
@@ -313,14 +335,16 @@ def upload_zip_to_drive(zip_data, filename, folder_id):
             temp_file.write(zip_data)
             temp_path = temp_file.name
 
-        # Upload to Drive
+        st.info("Uploading to Google Drive... This may take a while for large files.")
+        
+        # Upload to Drive with progress tracking
         drive_url = upload_to_drive(temp_path, folder_id)
         
         # Clean up
         os.unlink(temp_path)
         
         if not drive_url:
-            raise Exception("Failed to upload to Drive")
+            raise Exception("Failed to upload to Drive. Check the folder permissions.")
         
         return drive_url
 
