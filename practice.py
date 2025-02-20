@@ -437,81 +437,78 @@ def main():
                 if 'output_path' in locals() and os.path.exists(output_path):
                     os.remove(output_path)
     
-    with tab2:
-        col1, col2, col3 = st.columns(3)
+    with st.sidebar:
+        st.header("Google Drive Settings")
         
-        with col1:
-            subreddit_name = st.text_input("Subreddit name:", help="Enter subreddit name without r/")
+        st.markdown("""
+        ### Drive Setup Instructions:
+        1. Create a folder in Google Drive
+        2. Open the folder and copy the URL from your browser
+        3. Paste the complete folder URL below (example: https://drive.google.com/drive/folders/abc123...)
+        """)
         
-        with col2:
-            post_limit = st.number_input("Number of posts to scrape:", min_value=1, max_value=100, value=10)
+        # Add option to input URL or ID directly
+        input_type = st.radio(
+            "Input Type:",
+            ["Folder URL", "Folder ID"],
+            help="Choose whether to input the complete folder URL or just the folder ID"
+        )
         
-        with col3:
-            sort_by = st.selectbox("Sort by:", ["hot", "new", "top"])
+        if input_type == "Folder URL":
+            drive_input = st.text_input(
+                "Drive Folder URL:",
+                help="Paste the complete Google Drive folder URL"
+            )
+        else:
+            drive_input = st.text_input(
+                "Drive Folder ID:",
+                help="Enter the folder ID (the long string after /folders/ in the URL)"
+            )
         
-        col4, col5 = st.columns(2)
-        
-        with col4:
-            include_videos = st.checkbox("Include videos", value=True)
-        
-        with col5:
-            include_images = st.checkbox("Include images", value=True)
-        
-        if st.button("Scrape and Download Media", use_container_width=True):
-            if not subreddit_name:
-                st.error("Please enter a subreddit name")
-                return
-                
-            if not (include_videos or include_images):
-                st.error("Please select at least one media type (videos or images)")
-                return
-                
-            try:
-                progress_text = st.empty()
-                progress_bar = st.progress(0)
-                progress_text.text("Fetching posts from subreddit...")
-                
-                media_posts = get_subreddit_media(
-                    subreddit_name,
-                    post_limit,
-                    sort_by,
-                    include_videos,
-                    include_images
-                )
-                
-                if not media_posts:
-                    st.warning("No media posts found matching your criteria")
-                    return
-                
-                st.info(f"Found {len(media_posts)} media posts")
-                
-                progress_text.text("Starting batch download...")
-                zip_data = batch_download_media(media_posts, progress_text, progress_bar)
-                
-                progress_text.text("Download completed!")
-                
-                # Google Drive upload option
-                if not drive_folder_id:
-                        st.error("Please enter a Google Drive folder ID in the sidebar")
+        # Extract and validate folder ID
+        drive_folder_id = None
+        if drive_input:
+            if input_type == "Folder URL":
+                # Try to extract folder ID from URL
+                folder_id = extract_folder_id(drive_input)
+                if folder_id:
+                    drive_folder_id = folder_id
+                    st.success(f"✅ Extracted folder ID: {drive_folder_id}")
                 else:
-                    with st.spinner("Uploading to Google Drive..."):
-                      zip_filename = f"reddit_{subreddit_name}_media_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.zip"
-                      drive_url = upload_zip_to_drive(zip_data, zip_filename, drive_folder_id)
-                      if drive_url:
-                        st.success(f"Uploaded to Drive: [View File]({drive_url})")
-                
-                # Local download option
-                st.download_button(
-                    label="📦 Download All Media (ZIP)",
-                    data=zip_data,
-                    file_name=f"reddit_{subreddit_name}_media_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.zip",
-                    mime="application/zip",
-                    use_container_width=True
-                )
-                
-            except Exception as e:
-                st.error(f"Error during subreddit scraping: {str(e)}")
-    
+                    st.error("❌ Could not extract folder ID from URL. Please check the format.")
+            else:
+                # Direct folder ID input
+                if validate_folder_id(drive_input):
+                    drive_folder_id = drive_input
+                    st.success(f"✅ Valid folder ID: {drive_folder_id}")
+                else:
+                    st.error("❌ Invalid folder ID format. ID should only contain letters, numbers, hyphens, and underscores.")
+        
+        enable_drive_upload = st.checkbox("Enable Google Drive Upload", value=False)
+        
+        if enable_drive_upload:
+            if not drive_folder_id:
+                st.error("Please enter a valid Drive folder URL or ID")
+            else:
+                if "gcp_service_account" in st.secrets:
+                    service_account_email = st.secrets["gcp_service_account"].get("client_email", "Not configured")
+                    st.info(f"""
+                    ### Important:
+                    Share your folder with this service account email:
+                    ```
+                    {service_account_email}
+                    ```
+                    """)
+                    
+                    st.markdown("""
+                    ### Verification Checklist:
+                    - [ ] Folder is shared with service account email
+                    - [ ] Service account has "Editor" access
+                    - [ ] Waited a few seconds after sharing
+                    """)
+                else:
+                    st.error("❌ Service account not configured in secrets")
+
     # Instructions
     with st.expander("Instructions and Tips"):
         st.markdown("""
