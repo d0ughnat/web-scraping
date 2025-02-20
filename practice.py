@@ -245,12 +245,20 @@ def batch_download_media(media_posts, progress_placeholder, progress_bar):
 
 def extract_folder_id(drive_link):
     """Extract Google Drive folder ID from URL"""
+    if not drive_link:
+        return None
+        
+    # Clean up the input
+    drive_link = drive_link.strip()
+    
+    # Handle direct folder ID input (if it matches the format)
+    if re.match(r'^[a-zA-Z0-9_-]{33}$', drive_link):
+        return drive_link
+    
     patterns = [
         r'https://drive\.google\.com/drive/folders/([a-zA-Z0-9_-]+)(?:\?.*)?$',
         r'id=([a-zA-Z0-9_-]+)',
-        r'folders/([a-zA-Z0-9_-]+)(?:\?.*)?$',
-        r'open\?id=([a-zA-Z0-9_-]+)',
-        r'1([a-zA-Z0-9_-]{33})'  # Direct folder ID format
+        r'folders/([a-zA-Z0-9_-]+)(?:\?.*)?$'
     ]
     
     for pattern in patterns:
@@ -260,152 +268,65 @@ def extract_folder_id(drive_link):
             # Clean up any remaining URL parameters
             folder_id = folder_id.split('?')[0]
             return folder_id
+            
     return None
 
 def upload_to_drive(file_path, folder_id):
-    """Upload file to Google Drive using service account with improved error handling"""
+    """Upload file to Google Drive using service account"""
     try:
-        # Add detailed logging
-        st.write(f"Starting upload process for file: {os.path.basename(file_path)}")
-        
-        # Validate file exists and has content
+        # Validate inputs
         if not os.path.exists(file_path):
-            raise ValueError(f"File does not exist: {file_path}")
+            raise ValueError(f"File not found: {file_path}")
+            
+        if not folder_id:
+            raise ValueError("Folder ID is required")
         
-        if os.path.getsize(file_path) == 0:
-            raise ValueError(f"File is empty: {file_path}")
-
-        # Validate folder ID format
-        if not re.match(r'^[a-zA-Z0-9_-]+$', folder_id):
-            raise ValueError("Invalid folder ID format")
-
+        # Get credentials from secrets
         creds_data = st.secrets["gcp_service_account"]
         
-        # Validate credentials data
-        required_keys = ['client_email', 'private_key', 'project_id']
-        missing_keys = [key for key in required_keys if key not in creds_data]
-        if missing_keys:
-            raise ValueError(f"Missing required credential keys: {', '.join(missing_keys)}")
-
-        credentials = service_account.Credentials.from_service_account_info(
+        # Create credentials with required scopes
+        creds = Credentials.from_service_account_info(
             dict(creds_data),
-            scopes=[
-                'https://www.googleapis.com/auth/drive.file',
-                'https://www.googleapis.com/auth/drive.metadata.readonly'
-            ]
+            scopes=['https://www.googleapis.com/auth/drive.file']
         )
         
-        service = build('drive', 'v3', credentials=credentials)
-
-        # First, verify the folder exists and is accessible
-        try:
-            st.write("Verifying folder access...")
-            folder = service.files().get(
-                fileId=folder_id,
-                fields='id, name, mimeType',
-                supportsAllDrives=True
-            ).execute()
-            
-            if folder['mimeType'] != 'application/vnd.google-apps.folder':
-                raise ValueError("The provided ID is not a folder")
-            
-            st.write(f"Folder verified: {folder.get('name', 'Unnamed folder')}")
-                
-        except HttpError as error:
-            if error.resp.status == 404:
-                raise ValueError(f"Folder not found or not accessible. Please check the folder ID and permissions.")
-            else:
-                raise
-
-        # Proceed with file upload
+        # Build Drive service
+        service = build('drive', 'v3', credentials=creds)
+        
+        # Set up file metadata
         file_metadata = {
             'name': os.path.basename(file_path),
             'parents': [folder_id]
         }
-
-        # Get MIME type based on file extension
+        
+        # Get appropriate MIME type
         mime_type = 'application/octet-stream'  # default
         if file_path.endswith('.mp4'):
             mime_type = 'video/mp4'
         elif file_path.endswith('.zip'):
             mime_type = 'application/zip'
-
-        st.write(f"Starting file upload with MIME type: {mime_type}")
         
+        # Create media upload object
         media = MediaFileUpload(
             file_path,
             mimetype=mime_type,
             resumable=True,
             chunksize=1024*1024
         )
-
-        # Create the file with progress tracking
-        request = service.files().create(
+        
+        # Upload file with progress tracking
+        file = service.files().create(
             body=file_metadata,
             media_body=media,
-            fields='id, webViewLink',
-            supportsAllDrives=True
-        )
-
-        response = None
-        last_progress = 0
-        
-        while response is None:
-            status, response = request.next_chunk()
-            if status:
-                progress = int(status.progress() * 100)
-                if progress != last_progress:
-                    st.write(f"Upload progress: {progress}%")
-                    last_progress = progress
-
-        st.write("Upload completed successfully!")
-        return f"https://drive.google.com/file/d/{response.get('id')}/view"
-
-    except ValueError as e:
-        st.error(f"Drive configuration error: {str(e)}")
-        return None
-    except HttpError as e:
-        error_details = str(e)
-        if "insufficientFilePermissions" in error_details:
-            st.error("Error: The service account doesn't have permission to access the folder. Please share the folder with the service account email.")
-        else:
-            st.error(f"Google Drive API error: {error_details}")
-        return None
-    except Exception as e:
-        st.error(f"Upload error: {str(e)}")
-        return None
-
-def validate_drive_folder_id(folder_id):
-    """Validate Google Drive folder ID format and accessibility"""
-    if not folder_id:
-        return False, "Please enter a Google Drive folder ID"
-    
-    # Basic format validation
-    if not re.match(r'^[a-zA-Z0-9_-]+$', folder_id):
-        return False, "Invalid folder ID format"
-    
-    try:
-        creds_data = st.secrets["gcp_service_account"]
-        credentials = service_account.Credentials.from_service_account_info(
-            dict(creds_data),
-            scopes=['https://www.googleapis.com/auth/drive.metadata.readonly']
-        )
-        
-        service = build('drive', 'v3', credentials=credentials)
-        
-        folder = service.files().get(
-            fileId=folder_id,
-            fields='id, name, mimeType',
+            fields='id',
             supportsAllDrives=True
         ).execute()
         
-        if folder['mimeType'] != 'application/vnd.google-apps.folder':
-            return False, "The provided ID is not a folder"
-            
-        return True, f"Folder verified: {folder.get('name', 'Unnamed folder')}"
+        return f"https://drive.google.com/file/d/{file.get('id')}/view"
         
     except Exception as e:
-        return False, f"Error validating folder: {str(e)}"
+        st.error(f"Upload error: {str(e)}")
+        return None
 
 def upload_zip_to_drive(zip_data, filename, folder_id):
     """Upload zip data directly to Google Drive"""
