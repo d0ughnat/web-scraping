@@ -1,36 +1,30 @@
 import streamlit as st
-import requests
-from urllib.parse import urlparse, urlunparse, urljoin, unquote
-from bs4 import BeautifulSoup
-import json
-import random
-import re
-import os
-import hashlib
-import time
-import gdown
-import pandas as pd
-from googleapiclient.discovery import build
-from google.oauth2.service_account import Credentials
-from googleapiclient.http import MediaFileUpload
 import praw
+import os
+from yt_dlp import YoutubeDL
+from datetime import datetime
+import re
+import hashlib
+import requests
+from urllib.parse import urlparse, parse_qs
+from pathlib import Path
+import tempfile
 import zipfile
+import io
+from google.oauth2.credentials import Credentials
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+from googleapiclient.errors import HttpError
 
-# Initialize Reddit API
-reddit = praw.Reddit(
-    client_id=st.secrets["reddit"]["client_id"],
-    client_secret=st.secrets["reddit"]["client_secret"],
-    user_agent=st.secrets["reddit"]["user_agent"]
-)
-
-# Configure Streamlit page
+# Page configuration
 st.set_page_config(
-    page_title="Subreddit Media Scraper",
-    page_icon="🎯",
+    page_title="Reddit Media Downloader",
+    page_icon="🎥",
     layout="wide"
 )
 
-# Define styles
+# Custom CSS
 st.markdown("""
     <style>
     .main {
@@ -45,37 +39,213 @@ st.markdown("""
     .error {
         color: #dc3545;
     }
+    .download-stats {
+        margin: 10px 0;
+        padding: 10px;
+        background-color: #f8f9fa;
+        border-radius: 5px;
+    }
+    .user-info {
+        position: fixed;
+        top: 10px;
+        right: 10px;
+        background-color: #f8f9fa;
+        padding: 10px;
+        border-radius: 5px;
+        font-size: 0.9em;
+        z-index: 1000;
+    }
     </style>
     """, unsafe_allow_html=True)
 
-def create_zip_file(files):
-    """Create a zip file containing downloaded media"""
-    zip_path = "downloads/media_files.zip"
-    with zipfile.ZipFile(zip_path, 'w') as zipf:
-        for file in files:
-            if os.path.exists(file):
-                zipf.write(file, os.path.basename(file))
-    return zip_path
+# Initialize Reddit client
+@st.cache_resource
+def get_reddit_client():
+    return praw.Reddit(
+        client_id=st.secrets["reddit"]["client_id"],
+        client_secret=st.secrets["reddit"]["client_secret"],
+        user_agent=st.secrets["reddit"]["user_agent"]
+    )
 
-def extract_folder_id(drive_link):
-    """Extract Google Drive folder ID from URL"""
+def display_user_info():
+    """Display current time and user information"""
+    current_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    st.markdown(
+        f"""
+        <div class="user-info">
+            <div>UTC: {current_time}</div>
+            <div>User: d0ughnat</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+def extract_post_id(url_or_id):
+    """Extract Reddit post ID from URL or direct ID input"""
+    if not url_or_id:
+        return None
+        
+    # Direct ID
+    if len(url_or_id) >= 6 and '/' not in url_or_id:
+        return url_or_id
+        
+    # URL patterns
     patterns = [
-        r'https://drive.google.com/drive/folders/([a-zA-Z0-9_-]+)',
-        r'id=([a-zA-Z0-9_-]+)',
-        r'folders/([a-zA-Z0-9_-]+)'
+        r'reddit\.com/r/\w+/comments/(\w+)',
+        r'redd\.it/(\w+)',
+        r'/comments/(\w+)',
+        r'reddit\.com/\w+/(\w+)'
     ]
+    
     for pattern in patterns:
-        match = re.search(pattern, drive_link)
+        match = re.search(pattern, url_or_id)
         if match:
             return match.group(1)
+            
     return None
 
+def get_safe_filename(title, post_id):
+    """Generate a safe filename from post title and ID"""
+    # Clean the title
+    safe_title = re.sub(r'[^\w\-_]', '_', title)
+    safe_title = safe_title[:50]  # Limit length
+    
+    return f"{safe_title}_{post_id}"
+
+def download_image(url, output_path):
+    """Download image from URL"""
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        
+        with open(output_path, 'wb') as f:
+            f.write(response.content)
+        return True
+    except Exception as e:
+        st.error(f"Image download error: {str(e)}")
+        return False
+
+def download_reddit_video(url, output_path, progress_bar=None):
+    """Download Reddit video with audio using yt-dlp"""
+    try:
+        ydl_opts = {
+            'format': 'bv*+ba/b',
+            'outtmpl': output_path,
+            'quiet': True,
+            'no_warnings': True,
+            'merge_output_format': 'mp4',
+            'postprocessors': [{
+                'key': 'FFmpegVideoConvertor',
+                'preferedformat': 'mp4',
+            }],
+            'progress_hooks': [
+                lambda d: update_progress(d, progress_bar) if progress_bar else None
+            ]
+        }
+        
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if not info:
+                return False
+            ydl.download([url])
+            return True
+            
+    except Exception as e:
+        st.error(f"Download error: {str(e)}")
+        return False
+
+def update_progress(d, progress_bar):
+    """Update download progress bar"""
+    if d['status'] == 'downloading':
+        try:
+            total = d.get('total_bytes', 0) or d.get('total_bytes_estimate', 0)
+            downloaded = d.get('downloaded_bytes', 0)
+            if total > 0:
+                progress = downloaded / total
+                progress_bar.progress(progress)
+        except:
+            pass
+
+def get_subreddit_media(subreddit_name, limit, sort_by="hot", include_videos=True, include_images=True):
+    """Scrape media posts from a subreddit"""
+    reddit = get_reddit_client()
+    try:
+        subreddit = reddit.subreddit(subreddit_name)
+        media_posts = []
+        
+        # Get posts based on sort type
+        if sort_by == "hot":
+            posts = subreddit.hot(limit=limit)
+        elif sort_by == "new":
+            posts = subreddit.new(limit=limit)
+        elif sort_by == "top":
+            posts = subreddit.top(limit=limit)
+        else:
+            posts = subreddit.hot(limit=limit)
+        
+        for post in posts:
+            if post.is_video and include_videos:
+                if hasattr(post, 'media') and post.media and 'reddit_video' in post.media:
+                    media_posts.append({
+                        'type': 'video',
+                        'url': post.url,
+                        'title': post.title,
+                        'id': post.id,
+                        'direct_url': post.media['reddit_video']['fallback_url']
+                    })
+            elif include_images and hasattr(post, 'url'):
+                url = post.url.lower()
+                if any(url.endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif']):
+                    media_posts.append({
+                        'type': 'image',
+                        'url': post.url,
+                        'title': post.title,
+                        'id': post.id
+                    })
+        
+        return media_posts
+    except Exception as e:
+        st.error(f"Error accessing subreddit: {str(e)}")
+        return []
+
+def batch_download_media(media_posts, progress_placeholder, progress_bar):
+    """Download multiple media files and create a zip archive"""
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        total_posts = len(media_posts)
+        successful_downloads = 0
+        
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for i, post in enumerate(media_posts, 1):
+                progress_placeholder.text(f"Downloading {i}/{total_posts}: {post['title']}")
+                progress_bar.progress(i/total_posts)
+                
+                file_extension = '.mp4' if post['type'] == 'video' else os.path.splitext(post['url'])[1]
+                safe_filename = get_safe_filename(post['title'], post['id']) + file_extension
+                temp_path = os.path.join(temp_dir, safe_filename)
+                
+                success = False
+                if post['type'] == 'video':
+                    success = download_reddit_video(post['url'], temp_path)
+                else:
+                    success = download_image(post['url'], temp_path)
+                
+                if success and os.path.exists(temp_path):
+                    zip_file.write(temp_path, safe_filename)
+                    successful_downloads += 1
+                
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+        
+        progress_placeholder.text(f"Successfully downloaded {successful_downloads}/{total_posts} files")
+    
+    return zip_buffer.getvalue()
 
 def upload_to_drive(file_path, folder_id):
     """Upload file to Google Drive using service account"""
     try:
         creds_data = st.secrets["gcp_service_account"]
-
+        
         creds = Credentials.from_service_account_info(dict(creds_data))
         service = build('drive', 'v3', credentials=creds)
 
@@ -97,239 +267,216 @@ def upload_to_drive(file_path, folder_id):
         st.error(f"Upload error: {str(e)}")
         return None
 
-
-def download_media(url, filename):
-    """Download media file"""
+def upload_zip_to_drive(zip_data, filename, folder_id):
+    """Upload zip data directly to Google Drive"""
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        os.makedirs('downloads', exist_ok=True)
-        filepath = os.path.join('downloads', filename)
+        # Save zip data to temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as temp_file:
+            temp_file.write(zip_data)
+            temp_path = temp_file.name
+
+        # Upload to Drive
+        drive_url = upload_to_drive(temp_path, folder_id)
         
-        response = requests.get(url, headers=headers, stream=True)
-        if response.status_code == 200:
-            with open(filepath, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            return filepath
-    except Exception as e:
-        st.error(f"Download error: {str(e)}")
-    return None
-
-def scrape_subreddit(subreddit_name, limit, media_types=None, sort_by='hot'):
-    try:
-        media_urls = []
-        st.info(f"Starting to scrape r/{subreddit_name}")
-
-        if media_types is None:
-            media_types = ['images', 'audio', 'video']
-
-        subreddit = reddit.subreddit(subreddit_name)
-
-        if sort_by == 'hot':
-            posts = subreddit.hot(limit=limit)
-        elif sort_by == 'new':
-            posts = subreddit.new(limit=limit)
-        elif sort_by == 'top':
-            posts = subreddit.top(limit=limit)
-        else:
-            posts = subreddit.hot(limit=limit)
-
-        st.info(f"Processing {limit} posts from r/{subreddit_name}")
-
-        for post in posts:
-            try:
-                st.write(f"Checking post: {post.title[:50]}...")
-
-                # Gallery images
-                if hasattr(post, 'gallery_data') and 'images' in media_types:
-                    for item in post.gallery_data['items']:
-                        media_id = item['media_id']
-                        metadata = post.media_metadata[media_id]
-                        if metadata['status'] == 'valid' and metadata['e'] == 'Image':
-                            image_url = metadata['s']['u'].replace('&amp;', '&')
-                            media_urls.append(('image', image_url, post.title))
-
-                # Reddit-hosted videos
-                if hasattr(post, 'is_video') and post.is_video and 'video' in media_types:
-                    try:
-                        video_url = post.media['reddit_video']['fallback_url']
-                        media_urls.append(('video', video_url, post.title))
-
-                        # Extract audio URL
-                        if 'audio' in media_types:
-                            audio_url = video_url.rsplit('/', 1)[0] + '/DASH_audio.mp4'
-                            media_urls.append(('audio', audio_url, post.title))
-                    except Exception as e:
-                        st.warning(f"Video extraction failed: {e}")
-
-                # Direct images
-                if 'images' in media_types and any(post.url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
-                    media_urls.append(('image', post.url, post.title))
-
-                # Direct audio files
-                if 'audio' in media_types and any(post.url.lower().endswith(ext) for ext in ['.mp3', '.wav', '.ogg', '.m4a']):
-                    media_urls.append(('audio', post.url, post.title))
-
-                # Direct video files
-                if 'video' in media_types and any(post.url.lower().endswith(ext) for ext in ['.mp4', '.mov', '.webm']):
-                    media_urls.append(('video', post.url, post.title))
-
-                # YouTube videos
-                if 'video' in media_types and 'youtube.com' in post.url or 'youtu.be' in post.url:
-                    media_urls.append(('video', post.url, post.title))
-
-                # SoundCloud or Spotify links
-                if 'audio' in media_types and ('soundcloud.com' in post.url or 'spotify.com' in post.url):
-                    media_urls.append(('audio', post.url, post.title))
-
-                # Preview images
-                if hasattr(post, 'preview') and 'images' in media_types:
-                    try:
-                        preview_url = post.preview['images'][0]['source']['url'].replace('&amp;', '&')
-                        media_urls.append(('image', preview_url, post.title))
-                    except (KeyError, IndexError):
-                        pass
-
-                time.sleep(0.5)
-
-            except Exception as e:
-                st.warning(f"Error processing post: {e}")
-
-        # Remove duplicates
-        cleaned_urls = []
-        seen_urls = set()
-        for media_type, url, title in media_urls:
-            url = unquote(url).replace('&amp;', '&')
-            if url not in seen_urls:
-                seen_urls.add(url)
-                cleaned_urls.append((media_type, url, title))
-
-        st.success(f"Scraped {len(cleaned_urls)} media items from r/{subreddit_name}")
-        return cleaned_urls
+        # Clean up
+        os.unlink(temp_path)
+        
+        return drive_url
 
     except Exception as e:
-        st.error(f"Scraping failed: {e}")
-        return []
+        st.error(f"Drive upload error: {str(e)}")
+        return None
 
 def main():
-    st.title("🎯 Subreddit Media Scraper")
+    display_user_info()
+    st.title("🎥 Reddit Media Downloader")
     
-    # Download option selection
-    download_option = st.radio(
-        "Choose download option:",
-        ["Local Download", "Google Drive Upload"]
-    )
-    
-    # Show Drive folder input only if Drive option is selected
-    if download_option == "Google Drive Upload":
-        drive_link = st.text_input("Paste Google Drive folder link (set sharing to 'Anyone with the link can edit'):")
-        folder_id = extract_folder_id(drive_link) if drive_link else None
-    else:
-        folder_id = None
-
-    # Subreddit input
-    subreddit_name = st.text_input("Enter subreddit name (without r/):")
-    
-    # Media type selection
-    media_types = st.multiselect(
-        "Select media types to scrape",
-        ["images", "videos"],
-        default=["images"]
-    )
-
-    # Post sorting and limit
-    col1, col2 = st.columns(2)
-    with col1:
-        sort_by = st.selectbox(
-            "Sort posts by",
-            ["hot", "new", "top"]
+    # Drive folder ID input in sidebar
+    with st.sidebar:
+        st.header("Google Drive Settings")
+        drive_folder_id = st.text_input(
+            "Drive Folder ID:",
+            help="Enter the Google Drive folder ID where files should be uploaded"
         )
-    with col2:
-        post_limit = st.number_input(
-            "Number of posts to scan",
-            min_value=1,
-            max_value=1000,
-            value=10
+        enable_drive_upload = st.checkbox("Enable Google Drive Upload", value=False)
+    
+    # Tab selection
+    tab1, tab2 = st.tabs(["Single Post Download", "Subreddit Scraper"])
+    
+    with tab1:
+        url_or_id = st.text_input(
+            "Enter Reddit post URL or ID:",
+            help="You can enter either a full Reddit post URL or just the post ID"
         )
-
-    if subreddit_name and st.button("Scan Subreddit"):
-        with st.spinner(f"Scanning r/{subreddit_name} for media..."):
-            media_urls = scrape_subreddit(subreddit_name, post_limit, media_types, sort_by)
-            st.session_state.media_urls = media_urls
-
-            # Display results
-            if media_urls:
-                df = pd.DataFrame(media_urls, columns=['Type', 'URL', 'Post Title'])
-                st.dataframe(df)
-                st.success(f"Found {len(media_urls)} media items")
-            else:
-                st.warning("No media found")
-
-    # Download section
-    if st.session_state.get('media_urls'):
-        if download_option == "Google Drive Upload" and folder_id:
-            if st.button("Save to Google Drive"):
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                total = len(st.session_state.media_urls)
-                
-                for idx, (media_type, url, title) in enumerate(st.session_state.media_urls):
-                    safe_title = re.sub(r'[^\w\-_]', '_', title)[:50]
-                    ext = os.path.splitext(url)[1] or ('.mp4' if media_type == 'video' else '.jpg')
-                    filename = f"{safe_title}_{hashlib.md5(url.encode()).hexdigest()[:8]}{ext}"
-                    
-                    filepath = download_media(url, filename)
-                    
-                    if filepath:
-                        drive_link = upload_to_drive(filepath, folder_id)
-                        os.remove(filepath)
-                        if drive_link:
-                            st.markdown(f"✅ [Uploaded: {filename}]({drive_link})")
-                    
-                    progress_bar.progress((idx + 1) / total)
-                    status_text.text(f"Processed {idx + 1}/{total} files")
-                
-                status_text.text("Processing complete!")
         
-        elif download_option == "Local Download":
-            if st.button("Download Files"):
+        if st.button("Download Single Video", use_container_width=True):
+            if not url_or_id:
+                st.error("Please enter a valid Reddit post URL or ID")
+                return
+                
+            try:
+                post_id = extract_post_id(url_or_id)
+                if not post_id:
+                    st.error("Could not extract post ID from input")
+                    return
+                    
+                reddit = get_reddit_client()
+                submission = reddit.submission(id=post_id)
+                
+                if not submission.is_video:
+                    st.error("This post does not contain a Reddit-hosted video")
+                    return
+                    
+                progress_text = st.empty()
                 progress_bar = st.progress(0)
-                status_text = st.empty()
-                total = len(st.session_state.media_urls)
-                downloaded_files = []
+                progress_text.text("Starting download...")
                 
-                for idx, (media_type, url, title) in enumerate(st.session_state.media_urls):
-                    safe_title = re.sub(r'[^\w\-_]', '_', title)[:50]
-                    ext = os.path.splitext(url)[1] or ('.mp4' if media_type == 'video' else '.jpg')
-                    filename = f"{safe_title}_{hashlib.md5(url.encode()).hexdigest()[:8]}{ext}"
-                    
-                    filepath = download_media(url, filename)
-                    if filepath:
-                        downloaded_files.append(filepath)
-                        st.markdown(f"✅ Downloaded: {filename}")
-                    
-                    progress_bar.progress((idx + 1) / total)
-                    status_text.text(f"Downloaded {idx + 1}/{total} files")
+                output_path = get_safe_filename(submission.title, submission.id) + '.mp4'
                 
-                if downloaded_files:
-                    zip_path = create_zip_file(downloaded_files)
-                    with open(zip_path, "rb") as fp:
-                        st.download_button(
-                            label="Download ZIP file",
-                            data=fp,
-                            file_name="media_files.zip",
-                            mime="application/zip"
-                        )
-                    
-                    # Clean up downloaded files
-                    for file in downloaded_files:
-                        if os.path.exists(file):
-                            os.remove(file)
-                    if os.path.exists(zip_path):
-                        os.remove(zip_path)
+                with st.spinner('Downloading video with audio...'):
+                    if download_reddit_video(submission.url, output_path, progress_bar):
+                        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                            st.video(output_path)
+                            
+                            # Google Drive upload option
+                            if enable_drive_upload:
+                                if not drive_folder_id:
+                                    st.error("Please enter a Google Drive folder ID in the sidebar")
+                                else:
+                                    with st.spinner("Uploading to Google Drive..."):
+                                        drive_url = upload_to_drive(output_path, drive_folder_id)
+                                        if drive_url:
+                                            st.success(f"Uploaded to Drive: [View File]({drive_url})")
+                            
+                            # Local download option
+                            with open(output_path, 'rb') as f:
+                                st.download_button(
+                                    label="💾 Download Video",
+                                    data=f,
+                                    file_name=output_path,
+                                    mime="video/mp4",
+                                    use_container_width=True
+                                )
+                                
+                            progress_text.text("Download completed successfully!")
+                        else:
+                            st.error("Download failed: Output file is empty or missing")
+                            
+                        if os.path.exists(output_path):
+                            os.remove(output_path)
+                            
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
+                if 'output_path' in locals() and os.path.exists(output_path):
+                    os.remove(output_path)
+    
+    with tab2:
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            subreddit_name = st.text_input("Subreddit name:", help="Enter subreddit name without r/")
+        
+        with col2:
+            post_limit = st.number_input("Number of posts to scrape:", min_value=1, max_value=100, value=10)
+        
+        with col3:
+            sort_by = st.selectbox("Sort by:", ["hot", "new", "top"])
+        
+        col4, col5 = st.columns(2)
+        
+        with col4:
+            include_videos = st.checkbox("Include videos", value=True)
+        
+        with col5:
+            include_images = st.checkbox("Include images", value=True)
+        
+        if st.button("Scrape and Download Media", use_container_width=True):
+            if not subreddit_name:
+                st.error("Please enter a subreddit name")
+                return
                 
-                status_text.text("Download complete!")
+            if not (include_videos or include_images):
+                st.error("Please select at least one media type (videos or images)")
+                return
+                
+            try:
+                progress_text = st.empty()
+                progress_bar = st.progress(0)
+                progress_text.text("Fetching posts from subreddit...")
+                
+                media_posts = get_subreddit_media(
+                    subreddit_name,
+                    post_limit,
+                    sort_by,
+                    include_videos,
+                    include_images
+                )
+                
+                if not media_posts:
+                    st.warning("No media posts found matching your criteria")
+                    return
+                
+                st.info(f"Found {len(media_posts)} media posts")
+                
+                progress_text.text("Starting batch download...")
+                zip_data = batch_download_media(media_posts, progress_text, progress_bar)
+                
+                progress_text.text("Download completed!")
+                
+                # Google Drive upload option
+                if not drive_folder_id:
+                        st.error("Please enter a Google Drive folder ID in the sidebar")
+                else:
+                    with st.spinner("Uploading to Google Drive..."):
+                      zip_filename = f"reddit_{subreddit_name}_media_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.zip"
+                      drive_url = upload_zip_to_drive(zip_data, zip_filename, drive_folder_id)
+                      if drive_url:
+                        st.success(f"Uploaded to Drive: [View File]({drive_url})")
+                
+                # Local download option
+                st.download_button(
+                    label="📦 Download All Media (ZIP)",
+                    data=zip_data,
+                    file_name=f"reddit_{subreddit_name}_media_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.zip",
+                    mime="application/zip",
+                    use_container_width=True
+                )
+                
+            except Exception as e:
+                st.error(f"Error during subreddit scraping: {str(e)}")
+    
+    # Instructions
+    with st.expander("Instructions and Tips"):
+        st.markdown("""
+        ### Google Drive Upload:
+        1. Enable Google Drive upload in the sidebar
+        2. Enter the folder ID from your Google Drive
+        3. The folder ID is the last part of the URL when you open the folder in Drive
+        
+        ### Single Post Download:
+        1. Find a Reddit post containing a video
+        2. Copy either:
+           - The full post URL (e.g., `https://reddit.com/r/subreddit/comments/...)`
+           - Just the post ID (the random characters after `/comments/` in the URL)
+        3. Paste it into the input field
+        4. Click "Download Single Video"
+        
+        ### Subreddit Scraper:
+        1. Enter the subreddit name (without r/)
+        2. Choose the number of posts to scan
+        3. Select sorting method
+        4. Choose media types to include
+        5. Click "Scrape and Download Media"
+        6. Download the ZIP file or upload to Drive
+        
+        ### Notes:
+        - Video downloads only work with videos hosted directly on Reddit
+        - Downloads the best available quality with audio for videos
+        - Supported image formats: JPG, JPEG, PNG, GIF
+        - All temporary files are automatically cleaned up
+        - Large subreddit scrapes may take some time
+        - Google Drive uploads require proper service account configuration
+        """)
 
 if __name__ == "__main__":
     main()
